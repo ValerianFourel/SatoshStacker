@@ -20,7 +20,7 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +29,7 @@ import requests
 from .exchange import Exchange, public_ohlcv
 from .notify import Notifier
 from .secrets import redact
+from .tune import run_tune
 
 ROOT = Path(__file__).resolve().parent.parent
 TAKER = 0.001
@@ -172,12 +173,15 @@ def _lot(d): return Lot(**d) if d else Lot()
 class SatoshiTrader:
     def __init__(self, *, exchange: Exchange, store: TraderStore, notifier: Notifier,
                  llm_client, model: str, symbol: str, stack_usdc: float = 2000.0,
-                 dca_days: int = 30, cycle_hours: int = 4, news_enabled: bool = True) -> None:
+                 dca_days: int = 30, cycle_hours: int = 4, news_enabled: bool = True,
+                 tune_model: str = "qwen/qwen3.5-plus-20260420", decision_pings: bool = True,
+                 self_tune: bool = True) -> None:
         self.ex, self.store, self.notify = exchange, store, notifier
         self.client, self.model, self.symbol = llm_client, model, symbol
         self.stack_usdc = stack_usdc          # the managed stack size (ignore extra balance)
         self.dca_days, self.cycle_hours = dca_days, cycle_hours
         self.news_enabled = news_enabled
+        self.tune_model, self.decision_pings, self.self_tune = tune_model, decision_pings, self_tune
         self.rsi_n, self.weekly_ctx = load_technicals()
 
     # ----- live account balances = the pot -----
@@ -235,6 +239,7 @@ class SatoshiTrader:
             self.notify.send(f"🚀 satoshi-stacker started — managing a ${self.stack_usdc:,.0f} "
                              f"stack @ ${price:,.0f}")
 
+        self._maybe_tune(now)            # backtest best technicals at startup + weekly
         pot = bot.value(price)
         cur = bot.btc_frac(price)
         avg_entry = bot.avg
@@ -264,9 +269,14 @@ class SatoshiTrader:
             self.store.set("dca", dca.asdict())
 
         self._maybe_reports(now, price)
+        next_at = now + timedelta(hours=self.cycle_hours)
+        if self.decision_pings:
+            self.notify.send(f"🤖 {now:%H:%M}Z · {stance} → {int(round(target * 100))}% BTC · "
+                             f"{action} · next LLM call in {self.cycle_hours}h ({next_at:%H:%M}Z)")
         return {"ts": now.isoformat(), "price": price, "pot": round(pot),
                 "btc_frac": round(cur, 2), "stance": stance, "target": target,
-                "action": action, "avg_entry": round(avg_entry), "note": note}
+                "action": action, "avg_entry": round(avg_entry), "note": note,
+                "next_decision_at": next_at.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
     def _order(self, side, usd, price, now):
         coid = f"ss-{side}-{int(now.timestamp())}"
@@ -316,6 +326,26 @@ class SatoshiTrader:
             f"pot ${pot:,.0f}, BTC {100*btc*price/max(pot,1):.0f}% / cash {100*usdc/max(pot,1):.0f}%\n"
             f"recent trades: {tr}\n"
             f"🔧 self-tune: RSI period {rsi_n} — {ctx[:130]}")
+
+    def _maybe_tune(self, now):
+        """Backtest the best technicals at startup and once a week; reload the chosen
+        config and announce it. Fail-safe: keeps the existing technicals on any error."""
+        if not self.self_tune:
+            return
+        wk = now.strftime("%Y-W%U")
+        if self.store.get("last_tune") == wk:
+            return
+        res = run_tune(self.symbol, self.tune_model)
+        if res.get("error"):
+            self.store.set("tune_error", res["error"])
+            return
+        self.rsi_n, self.weekly_ctx = load_technicals()   # reload the freshly-written config
+        self.store.set("last_tune", wk)
+        ld, sug = res["leader"], res["suggested"]
+        self.notify.send(
+            f"🔧 Self-tune: leading technical = {ld['indicator']} on {ld['timeframe']} "
+            f"(IC {ld['ic']:+.3f}, {ld['direction']}). Using RSI{sug['rsi_period']} / "
+            f"{sug['regime']} regime{' (Qwen-confirmed)' if res.get('qwen_ok') else ''}.")
 
     def _maybe_reports(self, now, price):
         today = now.strftime("%Y-%m-%d")

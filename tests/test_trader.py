@@ -46,7 +46,7 @@ def _trader(tmp_path, price, holder, stack=2000.0):
     store = TraderStore(str(tmp_path / "t.db"))
     tr = SatoshiTrader(exchange=ex, store=store, notifier=Notifier(), llm_client=_client(holder),
                        model="x", symbol="BTC/USDT", stack_usdc=stack, dca_days=30,
-                       cycle_hours=4, news_enabled=False)
+                       cycle_hours=4, news_enabled=False, self_tune=False, decision_pings=False)
     return tr, box
 
 

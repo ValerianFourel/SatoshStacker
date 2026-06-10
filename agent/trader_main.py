@@ -35,9 +35,14 @@ def _build(args):
         from openai import OpenAI
         client = OpenAI(base_url=os.getenv("LLM_BASE_URL"), api_key=key)
     store = TraderStore(args.db)
-    news_on = os.getenv("NEWS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    def _flag(name, default):
+        return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
     trader = SatoshiTrader(exchange=ex, store=store, notifier=Notifier(), llm_client=client,
-                           model=model, symbol=cfg.symbol, news_enabled=news_on,
+                           model=model, symbol=cfg.symbol,
+                           news_enabled=_flag("NEWS_ENABLED", "true"),
+                           decision_pings=_flag("DECISION_PINGS", "true"),
+                           self_tune=_flag("SELF_TUNE", "true"),
+                           tune_model=os.getenv("TUNE_MODEL", "qwen/qwen3.5-plus-20260420"),
                            stack_usdc=float(os.getenv("STACK_USDC", "2000")),
                            dca_days=int(os.getenv("DCA_BENCHMARK_DAYS", "30")), cycle_hours=4)
     return cfg, trader
