@@ -132,22 +132,36 @@ class TraderStore:
 
 @dataclass
 class Lot:
-    """Shadow portfolio (benchmarks) with average-cost basis."""
+    """A portfolio (the bot's managed stack, or a benchmark) with avg-cost basis."""
     usdc: float = 0.0
     btc: float = 0.0
-    cost: float = 0.0
+    cost: float = 0.0   # total USD paid for the BTC currently held
 
     @property
     def avg(self): return self.cost / self.btc if self.btc > 1e-12 else 0.0
     def value(self, px): return self.usdc + self.btc * px
+    def btc_frac(self, px):
+        v = self.value(px)
+        return (self.btc * px) / v if v > 0 else 0.0
 
-    def buy(self, usd, px):
+    def buy(self, usd, px) -> float:
         usd = min(usd, self.usdc)
         if usd < 1:
-            return
+            return 0.0
         self.btc += usd * (1 - TAKER) / px
         self.cost += usd
         self.usdc -= usd
+        return usd
+
+    def sell(self, usd_value, px) -> float:
+        usd_value = min(usd_value, self.btc * px)
+        if usd_value < 1:
+            return 0.0
+        btc_sold = usd_value / px
+        self.cost *= max(0.0, 1 - btc_sold / self.btc)  # avg-cost: remove BTC at the avg
+        self.btc -= btc_sold
+        self.usdc += btc_sold * px * (1 - TAKER)
+        return usd_value
 
     def asdict(self): return self.__dict__
 
@@ -157,10 +171,11 @@ def _lot(d): return Lot(**d) if d else Lot()
 
 class SatoshiTrader:
     def __init__(self, *, exchange: Exchange, store: TraderStore, notifier: Notifier,
-                 llm_client, model: str, symbol: str, dca_days: int = 30,
-                 cycle_hours: int = 4, news_enabled: bool = True) -> None:
+                 llm_client, model: str, symbol: str, stack_usdc: float = 2000.0,
+                 dca_days: int = 30, cycle_hours: int = 4, news_enabled: bool = True) -> None:
         self.ex, self.store, self.notify = exchange, store, notifier
         self.client, self.model, self.symbol = llm_client, model, symbol
+        self.stack_usdc = stack_usdc          # the managed stack size (ignore extra balance)
         self.dca_days, self.cycle_hours = dca_days, cycle_hours
         self.news_enabled = news_enabled
         self.rsi_n, self.weekly_ctx = load_technicals()
@@ -199,51 +214,47 @@ class SatoshiTrader:
         now = now or datetime.now(timezone.utc)
         try:
             price = self.ex.get_price()
-            usdc, btc = self.balances()
             ohlc = np.array(public_ohlcv(self.symbol, "4h", 200))
             closes, highs = ohlc[:, 3], ohlc[:, 1]
         except Exception as e:  # noqa: BLE001
             return {"error": redact(e)}
-        pot = usdc + btc * price
 
-        # first run: snapshot the starting pot + seed cost basis + benchmarks
+        # the bot manages a LOGICAL stack of `stack_usdc` (not the full account balance);
+        # benchmarks are seeded from the same stack. Real orders mirror the logical trades.
+        bot = _lot(self.store.get("bot"))
         if not self.store.get("started"):
-            self.store.set("cost_basis", btc * price)        # seed existing BTC at start px
-            self.store.set("start", {"pot": pot, "price": price, "ts": now.isoformat()})
-            self.store.set("hodl", {"usdc": pot, "btc": 0.0, "cost": 0.0})  # all-in at start
-            hodl = _lot(self.store.get("hodl")); hodl.buy(pot, price)
+            bot = Lot(usdc=self.stack_usdc)
+            hodl = Lot(usdc=self.stack_usdc); hodl.buy(self.stack_usdc, price)  # all-in at start
             self.store.set("hodl", hodl.asdict())
-            self.store.set("dca", {"usdc": pot, "btc": 0.0, "cost": 0.0})
-            self.store.set("dca_slice", pot / max(1, int(self.dca_days * 24 / self.cycle_hours)))
+            self.store.set("dca", Lot(usdc=self.stack_usdc).asdict())
+            self.store.set("dca_slice", self.stack_usdc / max(1, int(self.dca_days * 24 / self.cycle_hours)))
+            self.store.set("start", {"price": price, "ts": now.isoformat()})
             self.store.set("started", True)
-            self.notify.send(f"🚀 satoshi-stacker started — pot ${pot:,.0f} "
-                             f"({btc:.6f} BTC + ${usdc:,.0f} USDC) @ ${price:,.0f}")
+            self.notify.send(f"🚀 satoshi-stacker started — managing a ${self.stack_usdc:,.0f} "
+                             f"stack @ ${price:,.0f}")
 
-        cost_basis = float(self.store.get("cost_basis", btc * price))
-        cur = (btc * price) / pot if pot > 0 else 0.0
-        avg_entry = cost_basis / btc if btc > 1e-12 else 0.0
-
+        pot = bot.value(price)
+        cur = bot.btc_frac(price)
+        avg_entry = bot.avg
         mom = momentum(closes, highs, price, self.rsi_n)
         news = live_news() if self.news_enabled else {}
-        target, stance, note = self.decide(price, mom, usdc, btc, avg_entry, cur, news)
+        target, stance, note = self.decide(price, mom, bot.usdc, bot.btc, avg_entry, cur, news)
 
-        # rebalance the REAL pot toward the target fraction
+        # rebalance the managed stack toward the target fraction (mirror with a real order)
         action = "hold"
         if target - cur > REBAL_BAND:
-            spend = min((target - cur) * pot, usdc)
-            if spend >= 5:
+            spend = bot.buy((target - cur) * pot, price)
+            if spend:
                 self._order("buy", spend, price, now)
-                cost_basis += spend
                 action = f"BUY ${spend:,.0f}"
         elif cur - target > REBAL_BAND:
-            sell_val = min((cur - target) * pot, btc * price)
-            if sell_val >= 5:
-                self._order("sell", sell_val, price, now)
-                cost_basis *= max(0.0, 1 - (sell_val / price) / btc)  # avg-cost: remove at avg
-                action = f"SELL ${sell_val:,.0f}"
-        self.store.set("cost_basis", cost_basis)
+            sold = bot.sell((cur - target) * pot, price)
+            if sold:
+                self._order("sell", sold, price, now)
+                action = f"SELL ${sold:,.0f}"
+        self.store.set("bot", bot.asdict())
 
-        # DCA benchmark deploys its per-cycle slice of the starting pot
+        # DCA benchmark deploys its per-cycle slice of the starting stack
         dca = _lot(self.store.get("dca"))
         slice_ = float(self.store.get("dca_slice", 0) or 0)
         if dca.usdc > 0 and slice_ > 0:
@@ -268,10 +279,8 @@ class SatoshiTrader:
 
     # ----- reports -----
     def _snapshot(self, price):
-        usdc, btc = self.balances()
-        pot = usdc + btc * price
-        cb = float(self.store.get("cost_basis", btc * price))
-        return usdc, btc, pot, (cb / btc if btc > 1e-12 else 0.0)
+        bot = _lot(self.store.get("bot"))
+        return bot.usdc, bot.btc, bot.value(price), bot.avg
 
     def daily_report(self, price=None):
         price = price or self.ex.get_price()

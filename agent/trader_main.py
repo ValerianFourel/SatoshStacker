@@ -38,6 +38,7 @@ def _build(args):
     news_on = os.getenv("NEWS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
     trader = SatoshiTrader(exchange=ex, store=store, notifier=Notifier(), llm_client=client,
                            model=model, symbol=cfg.symbol, news_enabled=news_on,
+                           stack_usdc=float(os.getenv("STACK_USDC", "2000")),
                            dca_days=int(os.getenv("DCA_BENCHMARK_DAYS", "30")), cycle_hours=4)
     return cfg, trader
 
