@@ -222,7 +222,9 @@ class SatoshiTrader:
         # the bot manages a LOGICAL stack of `stack_usdc` (not the full account balance);
         # benchmarks are seeded from the same stack. Real orders mirror the logical trades.
         bot = _lot(self.store.get("bot"))
-        if not self.store.get("started"):
+        # seed (or re-seed after a model/stack change) whenever the bot state is absent —
+        # keying on the 'bot' record, not a flag, so upgrades self-heal instead of zeroing
+        if self.store.get("bot") is None:
             bot = Lot(usdc=self.stack_usdc)
             hodl = Lot(usdc=self.stack_usdc); hodl.buy(self.stack_usdc, price)  # all-in at start
             self.store.set("hodl", hodl.asdict())
