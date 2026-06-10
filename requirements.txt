@@ -1,0 +1,12 @@
+# Runtime
+ccxt>=4.4               # Binance spot REST/WS, unified order API
+pandas>=2.2
+numpy>=1.26
+python-dotenv>=1.0      # load .env (keys never hardcoded)
+openai>=1.40            # OpenAI-compatible client for Qwen3.6-Plus (OpenRouter/DashScope)
+requests>=2.32          # public data fetch / web-search guard
+pyarrow>=15.0           # parquet for backtest data
+tenacity>=8.2           # retry/backoff for exchange + LLM calls
+
+# Dev / test
+pytest>=8.0

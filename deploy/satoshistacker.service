@@ -1,0 +1,30 @@
+# systemd unit for a non-Docker VPS install (venv). See DEPLOY.md, Option B.
+# Install: sudo cp deploy/satoshistacker.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now satoshistacker
+[Unit]
+Description=SatoshiStacker BTC/USDC accumulation agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=satoshi
+WorkingDirectory=/opt/satoshistacker
+EnvironmentFile=/opt/satoshistacker/.env
+ExecStart=/opt/satoshistacker/.venv/bin/python -m agent.main --mode testnet
+Restart=always
+RestartSec=10
+# graceful shutdown: SIGTERM -> loop.run leaves resting bids IN PLACE
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=satoshistacker
+# light hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/satoshistacker
+
+[Install]
+WantedBy=multi-user.target

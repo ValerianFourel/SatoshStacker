@@ -1,0 +1,15 @@
+# Run SatoshiStacker on a small VPS:  docker compose up -d --build
+services:
+  satoshistacker:
+    build: .
+    image: satoshistacker
+    container_name: satoshistacker
+    env_file: .env                 # secrets + config (never commit .env)
+    environment:
+      DB_PATH: /data/satoshistacker.db
+    volumes:
+      - ./data:/data               # SQLite state + paper book persist here
+    restart: unless-stopped        # auto-restart on crash/reboot
+    stop_grace_period: 30s         # allow graceful SIGTERM shutdown
+    command: ["--mode", "testnet"] # Milestone 3; switch to live only after review
+    # one-off preflight:  docker compose run --rm satoshistacker --preflight

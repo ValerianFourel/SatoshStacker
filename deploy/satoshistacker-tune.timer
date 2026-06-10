@@ -1,0 +1,13 @@
+# Run the self-tune weekly (Mondays 00:30 UTC). Install:
+#   sudo cp deploy/satoshistacker-tune.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now satoshistacker-tune.timer
+# (cron alternative:  30 0 * * 1  cd /opt/satoshistacker && .venv/bin/python -m backtest.weekly_tune)
+[Unit]
+Description=Run SatoshiStacker self-tune weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 00:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

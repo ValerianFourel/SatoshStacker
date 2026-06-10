@@ -1,0 +1,8 @@
+﻿id,344190
+apiKey,sk-ws-H.ILLDXM.iqls.MEUCIEHeDUTScI60SoRYgb8M17mTukGPLfw6fqKJUGZP6XwiAiEAsWlNu4FLm5TO0oXN2ssZygh7b4L3OO2isJDee-Hyloo
+apiHost,ws-oi3ic6git9pc3c45.ap-southeast-1.maas.aliyuncs.com
+openAiCompatible,https://ws-oi3ic6git9pc3c45.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+dashScope,https://ws-oi3ic6git9pc3c45.ap-southeast-1.maas.aliyuncs.com/api/v1
+description,binancetrade
+workspaceName,Default Workspace
+workspaceId,ws-oi3ic6git9pc3c45

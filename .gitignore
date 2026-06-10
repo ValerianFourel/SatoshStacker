@@ -1,0 +1,26 @@
+# secrets
+.env
+.env.local
+*.key
+*.pem
+*.p12
+
+# state / db
+*.db
+*.sqlite
+*.sqlite3
+*.paperbook.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# large data (re-fetch via backtest/fetch_data.py)
+backtest/data/*.parquet
+
+# keep backtest result CSVs out of git noise (regenerate via engine.py)
+backtest/results/*.csv

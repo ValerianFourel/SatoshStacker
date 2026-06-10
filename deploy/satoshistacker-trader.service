@@ -1,0 +1,23 @@
+# Active satoshi-stacker trader (testnet). 4h decision loop; auto daily+weekly Telegram.
+# Install: sudo cp deploy/satoshistacker-trader.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now satoshistacker-trader
+[Unit]
+Description=SatoshiStacker active satoshi-stacker trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=satoshi
+WorkingDirectory=/opt/satoshistacker
+EnvironmentFile=/opt/satoshistacker/.env
+ExecStart=/opt/satoshistacker/.venv/bin/python -m agent.trader_main --mode testnet
+Restart=always
+RestartSec=15
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=satoshistacker-trader
+
+[Install]
+WantedBy=multi-user.target

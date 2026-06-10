@@ -1,0 +1,7 @@
+# Lean RUNTIME deps for the live/testnet agent (no pandas/numpy — those are
+# backtest-only). Used by the Docker image. Full dev/backtest deps: requirements.txt
+ccxt>=4.4               # Binance spot REST/WS (testnet + live)
+openai>=1.40            # OpenAI-compatible client for Qwen3.6-Plus (OpenRouter)
+python-dotenv>=1.0      # load .env
+requests>=2.32          # public price feed + Telegram
+numpy>=1.26             # momentum metrics for the active trader (lean; pandas not needed live)

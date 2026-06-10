@@ -1,0 +1,197 @@
+{
+  "as_of": "2026-06-10T09:32:40Z",
+  "lookback_days": 60,
+  "backtest_leader": {
+    "indicator": "rsi_28",
+    "lag": 6,
+    "ic": 0.2067,
+    "direction": "momentum",
+    "abs_ic": 0.2067,
+    "timeframe": "4h"
+  },
+  "ranked": {
+    "1h": [
+      {
+        "indicator": "ema_cross_20_50",
+        "lag": 6,
+        "ic": 0.0918,
+        "direction": "momentum",
+        "abs_ic": 0.0918
+      },
+      {
+        "indicator": "ema_cross_8_21",
+        "lag": 6,
+        "ic": 0.0915,
+        "direction": "momentum",
+        "abs_ic": 0.0915
+      },
+      {
+        "indicator": "momentum_6",
+        "lag": 2,
+        "ic": -0.0788,
+        "direction": "reversion",
+        "abs_ic": 0.0788
+      },
+      {
+        "indicator": "rsi_14",
+        "lag": 6,
+        "ic": 0.07,
+        "direction": "momentum",
+        "abs_ic": 0.07
+      },
+      {
+        "indicator": "momentum_12",
+        "lag": 6,
+        "ic": 0.0697,
+        "direction": "momentum",
+        "abs_ic": 0.0697
+      },
+      {
+        "indicator": "rsi_28",
+        "lag": 6,
+        "ic": 0.0592,
+        "direction": "momentum",
+        "abs_ic": 0.0592
+      },
+      {
+        "indicator": "rsi_21",
+        "lag": 6,
+        "ic": 0.0574,
+        "direction": "momentum",
+        "abs_ic": 0.0574
+      },
+      {
+        "indicator": "bb_pctb_20",
+        "lag": 6,
+        "ic": 0.0565,
+        "direction": "momentum",
+        "abs_ic": 0.0565
+      },
+      {
+        "indicator": "rsi_7",
+        "lag": 6,
+        "ic": 0.0392,
+        "direction": "momentum",
+        "abs_ic": 0.0392
+      },
+      {
+        "indicator": "momentum_24",
+        "lag": 6,
+        "ic": 0.0375,
+        "direction": "momentum",
+        "abs_ic": 0.0375
+      },
+      {
+        "indicator": "macd_hist",
+        "lag": 2,
+        "ic": -0.0338,
+        "direction": "reversion",
+        "abs_ic": 0.0338
+      }
+    ],
+    "4h": [
+      {
+        "indicator": "rsi_28",
+        "lag": 6,
+        "ic": 0.2067,
+        "direction": "momentum",
+        "abs_ic": 0.2067
+      },
+      {
+        "indicator": "momentum_12",
+        "lag": 6,
+        "ic": 0.1447,
+        "direction": "momentum",
+        "abs_ic": 0.1447
+      },
+      {
+        "indicator": "rsi_7",
+        "lag": 6,
+        "ic": 0.1409,
+        "direction": "momentum",
+        "abs_ic": 0.1409
+      },
+      {
+        "indicator": "ema_cross_20_50",
+        "lag": 6,
+        "ic": 0.1356,
+        "direction": "momentum",
+        "abs_ic": 0.1356
+      },
+      {
+        "indicator": "momentum_24",
+        "lag": 6,
+        "ic": 0.1344,
+        "direction": "momentum",
+        "abs_ic": 0.1344
+      },
+      {
+        "indicator": "rsi_21",
+        "lag": 6,
+        "ic": 0.1319,
+        "direction": "momentum",
+        "abs_ic": 0.1319
+      },
+      {
+        "indicator": "ema_cross_8_21",
+        "lag": 6,
+        "ic": 0.1196,
+        "direction": "momentum",
+        "abs_ic": 0.1196
+      },
+      {
+        "indicator": "momentum_6",
+        "lag": 6,
+        "ic": 0.1187,
+        "direction": "momentum",
+        "abs_ic": 0.1187
+      },
+      {
+        "indicator": "rsi_14",
+        "lag": 6,
+        "ic": 0.1018,
+        "direction": "momentum",
+        "abs_ic": 0.1018
+      },
+      {
+        "indicator": "bb_pctb_20",
+        "lag": 6,
+        "ic": 0.0808,
+        "direction": "momentum",
+        "abs_ic": 0.0808
+      },
+      {
+        "indicator": "macd_hist",
+        "lag": 6,
+        "ic": 0.0537,
+        "direction": "momentum",
+        "abs_ic": 0.0537
+      }
+    ]
+  },
+  "qwen_decision": {
+    "timeframe": "4h",
+    "primary_indicator": "rsi_28",
+    "rsi_period": 28,
+    "lag": 6,
+    "regime": "momentum",
+    "confirming": [
+      "momentum_12",
+      "ema_cross_20_50"
+    ],
+    "context_note": "Regime is momentum: favor longs when RSI28 > 50 and rising. Confirm with momentum_12 and ema_cross_20_50 alignment. De-risk only on RSI28 bearish divergence or a decisive close below the 50-EMA. Avoid mean-reversion fades; trend persistence dominates. Scale positions at the 6-bar horizon.",
+    "rationale": "4h timeframe dominates with highest IC (0.2067). RSI28 shows strongest predictive power for forward returns, aligned with a clear momentum regime. Lag of 6 bars optimizes the signal-to-noise ratio. Confirming indicators provide structural trend validation to filter false breakouts."
+  },
+  "context_note": "Regime is momentum: favor longs when RSI28 > 50 and rising. Confirm with momentum_12 and ema_cross_20_50 alignment. De-risk only on RSI28 bearish divergence or a decisive close below the 50-EMA. Avoid mean-reversion fades; trend persistence dominates. Scale positions at the 6-bar horizon.",
+  "suggested": {
+    "timeframe": "4h",
+    "primary_indicator": "rsi_28",
+    "rsi_period": 28,
+    "lag": 6,
+    "regime": "momentum",
+    "confirming": [
+      "momentum_12",
+      "ema_cross_20_50"
+    ]
+  }
+}

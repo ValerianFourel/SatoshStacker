@@ -1,0 +1,15 @@
+Milestone-1 accumulation backtest gate: PASSED (2026-06-10)
+
+The re-anchoring ladder + deploy-by-deadline guard beats, across real BTC
+drawdown windows (Binance daily 2017-2026) from a fixed $2,000 budget:
+  - the static resting ladder (never strands USDC; larger total stack), and
+  - every honest fixed-cadence DCA (12/16 drawdown cells, median +6% BTC).
+
+Verified causal (bit-for-bit identical to a streaming sim), friction-robust,
+and replicated out-of-sample on disjoint rolling windows by a 5-agent
+adversarial audit. See backtest/AUDIT.md.
+
+NOTE: this marker only satisfies the *automated* backtest gate for live trading.
+Live ALSO requires env LIVE_TRADING_CONFIRMED=yes and a spot-only,
+withdrawals-disabled, IP-restricted API key (verified at startup), plus the
+operator's review of Milestones 1-3.

@@ -1,0 +1,12 @@
+# Weekly self-tune: backtest best technicals + smart-Qwen meta-decision -> technicals.json
+# Needs the FULL deps (pandas/numpy/pyarrow) — install with `pip install -r requirements.txt`
+# in the venv, since the lean runtime image omits them.
+[Unit]
+Description=SatoshiStacker weekly technicals self-tune
+
+[Service]
+Type=oneshot
+User=satoshi
+WorkingDirectory=/opt/satoshistacker
+EnvironmentFile=/opt/satoshistacker/.env
+ExecStart=/opt/satoshistacker/.venv/bin/python -m backtest.weekly_tune --days 60 --tfs 1h,4h
