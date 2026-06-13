@@ -137,8 +137,14 @@ class TelegramListener:
     def _build_chart(self, snap):
         from .plotter import build_btc_chart
         from .signal_tuner import load_tuned
+        picks = []
+        if snap:
+            try:                              # let the LLM choose which indicators to chart
+                picks = self.analyst.pick_indicators(snap)
+            except Exception:  # noqa: BLE001 - fall back to backtest-leading
+                picks = []
         return build_btc_chart(self.cfg, load_tuned(self.cfg.tuned_signals_path),
-                               snapshot=snap or None)
+                               snapshot=snap or None, indicators=picks or None)
 
     # ── network ──
     def _process_update(self, update: dict) -> None:

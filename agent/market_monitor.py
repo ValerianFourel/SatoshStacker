@@ -382,7 +382,26 @@ class MarketMonitor:
         self.ticker_fn = ticker_fn or (lambda: exchange.public_ticker_24h(cfg.symbol))
         self.funding_fn = funding_fn or (lambda: exchange.public_funding_oi(cfg.symbol))
         self.detector = AnomalyDetector(cfg)
+        self._mtf_cache: dict = {}
+        self._mtf_ts: float = 0.0
         self._load_state()
+
+    def _multi_tf(self, now: float) -> dict:
+        """RSI(14) + EMA trend per 5m/1h/4h/1d so the LLM sees each timeframe by name.
+        Cached ~3 min (these change slowly; keeps the per-scan loop light)."""
+        if self._mtf_cache and now - self._mtf_ts < 180:
+            return self._mtf_cache
+        out = {}
+        for tf in ("5m", "1h", "4h", "1d"):
+            try:
+                c = np.array(self.klines_fn(tf, 200), dtype=float)[:, 4]
+                slow = _ema(c, 21)
+                out[tf] = {"rsi_14": round(_rsi(c, 14), 1),
+                           "ema_trend_pct": round((_ema(c, 9) / slow - 1) * 100, 2) if slow else 0.0}
+            except Exception:  # noqa: BLE001 - skip a timeframe that fails
+                continue
+        self._mtf_cache, self._mtf_ts = out, now
+        return out
 
     def _load_state(self) -> None:
         try:
@@ -424,6 +443,7 @@ class MarketMonitor:
         m = compute_metrics(price=price, klines_fast=fast, klines_trend=trend,
                             order_book=book, cfg=self.cfg, now_ts=now, tuned=tuned,
                             ticker24=ticker24, funding=funding)
+        m["multi_tf"] = self._multi_tf(now)        # RSI/trend per 5m/1h/4h/1d (cached)
         fired = self.detector.evaluate(m, now_ts=now)
         m["events"] = [s.name for s in fired]
         _atomic_write_json(self.cfg.snapshot_path, m)
@@ -460,8 +480,9 @@ class MarketMonitor:
         try:
             from .plotter import build_btc_chart
             from .signal_tuner import load_tuned
+            picks = getattr(self.analyst, "last_plot", None)  # chosen during event_read
             png, cap = build_btc_chart(self.cfg, load_tuned(self.cfg.tuned_signals_path),
-                                       snapshot=m)
+                                       snapshot=m, indicators=picks or None)
             if png:
                 self.notifier.send_photo(png, cap)
         except Exception as e:  # noqa: BLE001 - a chart must never break the alert

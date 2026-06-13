@@ -70,9 +70,12 @@ def render_chart(klines: list, *, title: str, panels: list, marks: dict | None =
 
 
 def build_btc_chart(cfg, tuned: dict | None, *, snapshot: dict | None = None,
-                    klines_fn=None) -> tuple[bytes | None, str]:
-    """Fetch candles, plot price + the tuned leading indicators, return (png, caption)."""
-    from .signal_tuner import _pretty, compute_one
+                    klines_fn=None, indicators=None) -> tuple[bytes | None, str]:
+    """Fetch candles and plot price + indicators, return (png, caption).
+
+    ``indicators`` (validated battery names) = the LLM's picks; if absent, fall back to
+    the backtest-leading tuned top/bottom callers, else RSI(14)."""
+    from .signal_tuner import PERIODS, _pretty, compute_one
     import numpy as np
     if klines_fn is None:
         from .exchange import public_klines
@@ -82,24 +85,27 @@ def build_btc_chart(cfg, tuned: dict | None, *, snapshot: dict | None = None,
     a = np.array(kl, dtype=float)
     o, h, l, c, v = a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5]
 
-    panels, names = [], []
-    for side in ("best_top", "best_bottom"):
-        sig = (tuned or {}).get(side)
-        if sig and sig["name"] not in names:
-            names.append(sig["name"])
-            series = compute_one(sig["name"], o, h, l, c, v)
-            panels.append((_pretty(sig["name"]), series, _BANDS.get(sig["name"])))
-    if not panels:  # no tuned signals yet -> default to RSI(14)
-        panels.append(("RSI(14)", compute_one("rsi_14", o, h, l, c, v), (70, 30)))
-        names.append("rsi_14")
+    names: list[str] = []
+    if indicators:                                       # LLM-picked
+        names = [n for n in indicators if n in PERIODS][:3]
+    if not names:                                        # backtest-leading
+        for side in ("best_top", "best_bottom"):
+            sig = (tuned or {}).get(side)
+            if sig and sig["name"] not in names:
+                names.append(sig["name"])
+    if not names:
+        names = ["rsi_14"]
+    names = names[:3]
+    panels = [(_pretty(n), compute_one(n, o, h, l, c, v), _BANDS.get(n)) for n in names]
 
     marks = None
     if snapshot:
         t = snapshot.get("technicals", {})
-        marks = {"24h high": (t.get("high_24h"), "#d9534f"),
-                 "24h low": (t.get("low_24h"), "#5cb85c")}
-        marks = {k: vv for k, vv in marks.items() if vv[0]}
-    title = f"BTC {tf} — price + leading indicators: {', '.join(_pretty(n) for n in names)}"
+        marks = {k: vv for k, vv in {"24h high": (t.get("high_24h"), "#d9534f"),
+                                     "24h low": (t.get("low_24h"), "#5cb85c")}.items()
+                 if vv[0]}
+    src = "LLM-picked" if indicators else "backtest-leading"
+    title = f"BTC {tf} — price + {', '.join(_pretty(n) for n in names)}"
     png = render_chart(kl, title=title, panels=panels, marks=marks)
-    cap = "📈 *BTC* — " + " · ".join(_pretty(n) for n in names) + f"  (`{tf}`, backtest-leading)"
+    cap = "📈 *BTC* — " + " · ".join(_pretty(n) for n in names) + f"  (`{tf}`, {src})"
     return png, cap

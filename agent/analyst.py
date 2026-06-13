@@ -22,33 +22,31 @@ from .scratch import Scratch, ScratchError
 log = logging.getLogger("satoshistacker.analyst")
 
 _SYSTEM = (
-    "You are a precise BTC market microstructure & technical analyst for one "
-    "operator. You receive COMPUTED NUMBERS (price, order-book depth/imbalance, "
-    "volume surge, RSI/EMAs, ATR/volatility, accurate 24h & 7d ranges, perp funding "
-    "rate & open interest), plus BTC headlines and day/week/month Fear&Greed, and "
-    "optionally web ``search_results`` you requested (each may include the article's "
-    "full ``content`` — read it, don't just skim titles). "
-    "The data is a POINT-IN-TIME snapshot: a ``time`` block gives the as-of timestamp "
-    "and data age — anchor your read to that moment and flag anything stale. "
-    "ORDER OF PRIORITY: read the PRICE, CANDLES, order book, funding & OI FIRST; treat "
-    "news & sentiment as SECONDARY confirmation/context, not the lead. "
-    "Explain in plain, concise language what is happening RIGHT NOW — e.g. likely "
-    "local top/bottom, exhaustion, breakout, volume/volatility spike, thin book, "
-    "crowded funding — and state caveats. "
-    "If you need fresh context (a catalyst behind a move, an ETF/macro/BTC story), set "
-    "``search`` to ONE concise query and you will be re-invoked with results; otherwise "
-    "set it to \"\". "
-    "If the user constrains the time window (before/after/between dates, or relative like "
-    "'last week' / 'since the halving'), also set ``search_after`` and/or ``search_before`` "
-    "as YYYY-MM-DD — resolve relative phrases using the provided ``today``. 'before X' => "
-    "search_before=X; 'after X' => search_after=X; 'between A and B' => both. "
-    "HARD RULE: you are read-only. You must NOT give buy/sell/hold advice, price "
-    "targets to act on, or position sizing. Describe, don't direct. "
-    "You MAY save notes or computed tables to scratch files. Respond with STRICT "
-    "JSON only:\n"
-    '{"reply":"<=140 words, plain text","search":"<query or empty>",'
-    '"search_after":"<YYYY-MM-DD or empty>","search_before":"<YYYY-MM-DD or empty>",'
-    '"files":[{"name":"notes.md","content":"..."}]}  (search/dates/files optional).'
+    "You are a precise BTC market analyst for one operator. You receive a "
+    "TIMEFRAME-LABELLED snapshot of computed numbers. Read each key's timeframe "
+    "carefully and NEVER mix them up (a 5m reading is not a daily one):\n"
+    "• `as_of_time` — when this data is from; anchor everything to it, flag if stale.\n"
+    "• `price_now` — the LIVE price. `returns_pct` are over 1m / 5m / 1h / 24h.\n"
+    "• `ranges` — accurate 24h and 7d high/low + position within the 24h range.\n"
+    "• `technicals_<tf>` — RSI / EMA-trend / ATR on THAT candle timeframe.\n"
+    "• `multi_timeframe` — RSI & trend on 5m/1h/4h/1d; use the timeframe matching the "
+    "horizon being asked about.\n"
+    "• `order_book` — depth/imbalance now. `futures` — perp funding (per 8h) + open interest.\n"
+    "• `tuned_signals` — the backtest-best top/bottom indicators and their current readings.\n"
+    "• `news.sentiment` — Fear&Greed for day/week/month; `headlines` are recent.\n"
+    "ORDER OF PRIORITY: read PRICE, CANDLES, order book, funding & OI FIRST; treat news "
+    "& sentiment as SECONDARY context, not the lead. Say which timeframe a reading is on. "
+    "Explain plainly what is happening RIGHT NOW (likely top/bottom, exhaustion, breakout, "
+    "volume/volatility spike, thin book, crowded funding) with caveats. "
+    "Set `plot` to up to 3 indicator names FROM `available_indicators` that best illustrate "
+    "the current situation to chart (e.g. the one that's flashing + context); [] = use default. "
+    "If you need fresh context set `search` to ONE concise query (else \"\"); for a time "
+    "window set `search_after`/`search_before` as YYYY-MM-DD (resolve relative phrases via "
+    "`today`). HARD RULE: read-only — NO buy/sell/hold advice, targets, or sizing; describe, "
+    "don't direct. You MAY save notes to scratch files. Respond with STRICT JSON only:\n"
+    '{"reply":"<=140 words","plot":["<=3 names from available_indicators"],'
+    '"search":"<query or empty>","search_after":"<YYYY-MM-DD or empty>",'
+    '"search_before":"<YYYY-MM-DD or empty>","files":[{"name":"notes.md","content":"..."}]}'
 )
 
 
@@ -100,9 +98,29 @@ def numeric_summary(m: dict) -> str:
 
 
 def _features(m: dict) -> dict:
-    """Compact numeric payload for the LLM (keeps tokens small)."""
-    return {k: m.get(k) for k in ("symbol", "price", "iso", "technicals",
-                                  "volume", "order_book", "events")}
+    """Timeframe-LABELLED payload for the LLM — every block tagged with its horizon
+    so the model never confuses a 5m reading with a daily one."""
+    t = m.get("technicals", {})
+    tf = m.get("time", {}).get("trend_tf", "1h")
+    return {
+        "as_of_time": m.get("time", {}),
+        "price_now": m.get("price"),
+        "returns_pct": {"1m": t.get("ret_1m_pct"), "5m": t.get("ret_5m_pct"),
+                        "1h": t.get("ret_1h_pct"), "24h": t.get("change_24h_pct")},
+        "ranges": {"high_24h": t.get("high_24h"), "low_24h": t.get("low_24h"),
+                   "range_position_pct": t.get("range_position_pct"),
+                   "high_7d": t.get("high_7d"), "low_7d": t.get("low_7d")},
+        f"technicals_{tf}": {"rsi_14": t.get("rsi_14"),
+                             "ema_trend_pct": t.get("ema_trend_pct"),
+                             "atr_pct": t.get("atr_pct"),
+                             "realized_vol_pct": t.get("realized_vol_pct")},
+        "multi_timeframe": m.get("multi_tf"),
+        "volume": m.get("volume"),
+        "order_book": m.get("order_book"),
+        "futures": m.get("futures"),
+        "tuned_signals": m.get("tuned"),
+        "events_fired": m.get("events"),
+    }
 
 
 def format_search(query: str, results: list[dict]) -> str:
@@ -123,6 +141,10 @@ class MockAnalyst:
 
     def __init__(self, scratch: Scratch | None = None) -> None:
         self.scratch = scratch
+        self.last_plot: list = []
+
+    def pick_indicators(self, m: dict) -> list:
+        return []
 
     def event_read(self, m: dict, signals) -> str:
         names = ", ".join(getattr(s, "name", str(s)) for s in signals)
@@ -148,6 +170,14 @@ class LLMAnalyst:
         self.max_tokens = max_tokens
         self.news_fn = news_fn        # () -> dict | None  (cached BTC news + Fear&Greed)
         self.search_fn = search_fn    # (query) -> list[dict]  (web results)
+        self.last_plot: list = []     # indicators the LLM chose to chart on the last call
+
+    @staticmethod
+    def _valid_plot(names) -> list:
+        from .signal_tuner import PERIODS
+        if not isinstance(names, list):
+            return []
+        return [str(n) for n in names if str(n) in PERIODS][:3]
 
     def _llm(self, payload: dict) -> dict | None:
         """One raw LLM call -> parsed JSON dict (or {'reply': prose}); None on error."""
@@ -182,7 +212,9 @@ class LLMAnalyst:
                 news = self.news_fn()
             except Exception:  # noqa: BLE001
                 news = None
-        p = {**payload, "today": datetime.date.today().isoformat()}
+        from .signal_tuner import PERIODS
+        p = {**payload, "today": datetime.date.today().isoformat(),
+             "available_indicators": list(PERIODS)}
         if news:
             p["news"] = news
         d = self._llm(p)
@@ -203,6 +235,7 @@ class LLMAnalyst:
             if d2 is not None:
                 d = d2
                 d["_searched"] = tag
+        self.last_plot = self._valid_plot(d.get("plot"))   # LLM's chart-indicator picks
         reply = str(d.get("reply", "")).strip() or fallback
         if d.get("_searched"):
             reply += f"\n🔎 searched: {d['_searched']}"
@@ -249,6 +282,13 @@ class LLMAnalyst:
                    "search_results": results, "state": _features(m)}
         return self._respond(payload, fallback=format_search(query, results),
                              allow_search=False)  # already searched
+
+    def pick_indicators(self, m: dict) -> list:
+        """Ask the LLM which up-to-3 indicators best illustrate now (for charts)."""
+        self.last_plot = []
+        self._respond({"task": "pick_chart_indicators", "state": _features(m)},
+                      fallback="", allow_search=False)
+        return self.last_plot
 
 
 def build_analyst(cfg: AnalysisConfig, api_key: str, scratch: Scratch | None,

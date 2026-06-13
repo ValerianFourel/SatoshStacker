@@ -415,6 +415,32 @@ def test_chart_renders_png_with_leading_indicators():
     assert "RSI(14)" in cap and "MFI(14)" in cap
 
 
+def test_analyst_picks_indicators_via_llm():
+    from agent.analyst import LLMAnalyst
+    from agent.config import AnalysisConfig
+    a = LLMAnalyst(AnalysisConfig(), api_key="x")
+    a._llm = lambda p: {"reply": "", "plot": ["rsi_14", "macd_hist", "not_real"]}
+    assert a.pick_indicators({"price": 1}) == ["rsi_14", "macd_hist"]   # invalid dropped
+
+
+def test_build_chart_uses_llm_picked_indicators():
+    from agent.plotter import build_btc_chart
+    kl = [[float(i * 3_600_000), 100 + i, 101 + i, 99 + i, 100 + i, 10.0] for i in range(60)]
+    png, cap = build_btc_chart(WatchConfig(), None, klines_fn=lambda tf, lim: kl,
+                               indicators=["rsi_14", "cci_20"])
+    assert "RSI(14)" in cap and "CCI(20)" in cap and "LLM-picked" in cap
+
+
+def test_features_are_timeframe_labelled():
+    from agent.analyst import _features
+    snap = compute_metrics(price=110_000.0, klines_fast=flat_fast(),
+                           klines_trend=trend_klines(), order_book=book(),
+                           cfg=WatchConfig(), now_ts=1.0)
+    f = _features(snap)
+    assert {"returns_pct", "ranges", "as_of_time", "multi_timeframe"} <= set(f)
+    assert any(k.startswith("technicals_") for k in f)     # readings tagged by timeframe
+
+
 def test_listener_chart_command_sends_photo(monkeypatch):
     note = FakeNotifier()
     lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
