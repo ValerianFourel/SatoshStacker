@@ -1,0 +1,24 @@
+# Read-only BTC watch service — SEPARATE image from the trader. No exchange keys,
+# no order path. Public Binance data + LLM analysis + Telegram + web search.
+#   docker compose -f docker-compose.btcwatch.yml up -d --build
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    WATCH_TUNED_PATH=/app/state/watch_signals.json
+
+WORKDIR /app
+
+# runtime deps + trafilatura (clean article extraction for the analyst's web reads)
+COPY requirements-runtime.txt .
+RUN pip install --no-cache-dir -r requirements-runtime.txt trafilatura
+
+# only the agent package is needed (btcwatch imports nothing from backtest/tests)
+COPY agent/ ./agent/
+
+# state (snapshot, detector cooldowns, onboarding marker, tuned signals) persists here
+RUN mkdir -p /app/state /app/scratch
+VOLUME ["/app/state"]
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["python", "-m", "agent.btcwatch"]

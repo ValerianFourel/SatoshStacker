@@ -176,6 +176,9 @@ class WatchConfig:
             web_search_enabled=_b("WATCH_WEB_SEARCH", True),
             fetch_articles=_i("WATCH_FETCH_ARTICLES", 2),
             article_max_chars=_i("WATCH_ARTICLE_MAX_CHARS", 2500),
+            tuned_signals_path=os.getenv("WATCH_TUNED_PATH", "agent/watch_signals.json"),
+            tune_timeframe=os.getenv("WATCH_TUNE_TF", "1h"),
+            tune_weeks=_f("WATCH_TUNE_WEEKS", 8.0),
         )
 
 

@@ -1,0 +1,20 @@
+# Read-only BTC watch (monitor + LLM analyst + Telegram + web search). NO trading.
+#   build + seed the tuned signals on server data, then run 24/7:
+#     docker compose -f docker-compose.btcwatch.yml build
+#     docker compose -f docker-compose.btcwatch.yml run --rm btcwatch --tune
+#     docker compose -f docker-compose.btcwatch.yml up -d
+#   logs:  docker compose -f docker-compose.btcwatch.yml logs -f
+services:
+  btcwatch:
+    build:
+      context: .
+      dockerfile: Dockerfile.btcwatch
+    image: satoshistacker-btcwatch
+    container_name: satoshistacker-btcwatch
+    env_file: .env                  # reuses LLM_* + TELEGRAM_* (no exchange keys needed)
+    environment:
+      WATCH_TUNED_PATH: /app/state/watch_signals.json   # --tune + live share this (persists)
+    volumes:
+      - ./btcwatch-state:/app/state # snapshot, cooldowns, onboarding marker, tuned signals
+    restart: unless-stopped
+    stop_grace_period: 15s

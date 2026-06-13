@@ -100,13 +100,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.tune:
         import datetime
         from .signal_tuner import leaderboard_text, run_tune
-        res = run_tune(cfg.symbol, timeframe=args.tf or cfg.tune_timeframe,
+        # default sweeps 5m/1h/4h/1d; --tf pins one. Live detector uses the trend-TF winner.
+        tfs = [args.tf] if args.tf else ["5m", "1h", "4h", "1d"]
+        live_tf = args.tf or cfg.trend_tf
+        res = run_tune(cfg.symbol, timeframes=tfs, live_tf=live_tf,
                        weeks=args.weeks or cfg.tune_weeks,
                        out_path=cfg.tuned_signals_path,
                        stamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
         txt = leaderboard_text(res)
-        print(txt + f"\n\nsaved -> {cfg.tuned_signals_path} (live detector will use these)")
-        notifier.send("🔬 *Signal tune complete* — live detector now uses these.\n" + txt)
+        print(txt + f"\n\nsaved -> {cfg.tuned_signals_path} (live detector uses the {live_tf} winners)")
+        notifier.send("🔬 *Signal tune complete* — live detector now uses these.\n" + txt[:3500])
         return 0
     if args.test_telegram:
         notifier.send("✅ SatoshiStacker BTC watch: Telegram OK (read-only monitor).")

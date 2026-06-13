@@ -149,13 +149,20 @@ The analyst is read-only but may write notes/metrics to a **sandboxed scratch di
 fails safe to a deterministic numeric summary. All metric math + the detector + the
 chat-gate are unit-tested with zero network (`tests/test_btcwatch.py`).
 
-**Signal tuning (`--tune`, `signal_tuner.py`).** Backtests a BATTERY of momentum oscillators
-(RSI 7/14/21/28, Stochastic, Williams %R, CCI, ROC, MFI, EMA-cross) over the past `--weeks`,
-labels real swing tops/bottoms (±swing_w extrema), and scores each by rank-AUC (+ best-F1
-threshold) at marking them. The top-AUC and bottom-AUC winners go to `agent/watch_signals.json`;
-the live detector then fires peaks/bottoms off the tuned signal+threshold (RSI defaults if absent).
-`python -m agent.btcwatch --tune [--weeks 8 --tf 1h]` (verified live: MFI(14) best top-caller,
-RSI(14) best bottom-caller on recent BTC).
+**Signal tuning (`--tune`, `signal_tuner.py`).** Backtests a family-diverse BATTERY across
+**multiple timeframes (5m/1h/4h/1d)** and reports the best top/bottom caller PER FAMILY (combine
+across families, don't stack redundant ones):
+- *momentum*: RSI, Stochastic, StochRSI, MACD-hist, CCI, Williams %R, ROC
+- *volatility*: Bollinger %B + width, Keltner position, ATR%
+- *trend*: EMA crosses (21/50, 50/200), SMA-200 distance, Supertrend
+- *volume*: MFI, OBV slope, VWAP distance, CVD slope
+
+It labels real swing tops/bottoms (±swing_w extrema) and scores each by rank-AUC + best-F1
+threshold. The `live_tf` (= monitor trend TF) winners go to `agent/watch_signals.json`; the live
+detector fires peaks/bottoms off the tuned signal+threshold (RSI defaults if absent).
+`python -m agent.btcwatch --tune [--weeks 8 --tf 1h]` — verified live (4h cleanest, AUC ~0.8;
+e.g. 4h top=vwap_dist/rsi, bottom=rsi). NOTE: crypto-native flags (funding, OI, liquidations,
+on-chain) are not yet in the battery — they need Binance-futures/Coinglass/Glassnode feeds.
 
 Run: `python -m agent.btcwatch [--once|--status|--test-telegram|--tune]`; deploy
 `deploy/satoshistacker-btcwatch.service`. Config: `WATCH_*` in `.env`.

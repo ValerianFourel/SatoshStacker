@@ -93,31 +93,149 @@ def _ema(c, n):
     return e
 
 
-def _ema_cross(c, a, b):
-    return (_ema(c, a) - _ema(c, b)) / _ema(c, b) * 100   # higher = fast above slow
+def _sma(x, n):
+    out = np.full(len(x), np.nan)
+    cs = np.cumsum(np.insert(np.nan_to_num(x), 0, 0.0))
+    out[n - 1:] = (cs[n:] - cs[:-n]) / n
+    return out
 
 
-# name -> (callable, period) ; period is metadata for the live monitor
+def _true_range(h, l, c):
+    tr = np.empty(len(c))
+    tr[0] = h[0] - l[0]
+    tr[1:] = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]),
+                                                  np.abs(l[1:] - c[:-1])))
+    return tr
+
+
+def _atr(h, l, c, n):
+    return _sma(_true_range(h, l, c), n)
+
+
+def _ema_cross(c, a, b):              # momentum/trend: higher = fast above slow
+    return (_ema(c, a) - _ema(c, b)) / _ema(c, b) * 100
+
+
+def _stoch_rsi(c, n):                 # stochastic of RSI — twitchier, crypto-popular
+    r = _rsi(c, n)
+    out = np.full(len(c), np.nan)
+    for i in range(2 * n, len(c)):
+        w = r[i - n + 1:i + 1]
+        lo, hi = np.nanmin(w), np.nanmax(w)
+        out[i] = 50.0 if hi == lo else 100 * (r[i] - lo) / (hi - lo)
+    return out
+
+
+def _macd_hist(c):                    # MACD histogram (12/26/9); higher = bullish thrust
+    macd = _ema(c, 12) - _ema(c, 26)
+    return macd - _ema(macd, 9)
+
+
+def _bb_pctb(c, n):                   # Bollinger %B: >1 above upper band (stretched up)
+    mid, out = _sma(c, n), np.full(len(c), np.nan)
+    for i in range(n - 1, len(c)):
+        sd = c[i - n + 1:i + 1].std()
+        out[i] = 0.5 if sd == 0 else (c[i] - (mid[i] - 2 * sd)) / (4 * sd)
+    return out * 100
+
+
+def _bb_width(c, n):                  # Bollinger band width (volatility squeeze gauge)
+    mid, out = _sma(c, n), np.full(len(c), np.nan)
+    for i in range(n - 1, len(c)):
+        sd = c[i - n + 1:i + 1].std()
+        out[i] = 0.0 if mid[i] == 0 else 4 * sd / mid[i] * 100
+    return out
+
+
+def _keltner_pos(h, l, c, n):         # position vs Keltner channel (EMA ± ATR)
+    e, a = _ema(c, n), _atr(h, l, c, n)
+    return np.where(a == 0, 0.0, (c - e) / a)
+
+
+def _atr_pct(h, l, c, n):
+    a = _atr(h, l, c, n)
+    return np.where(c == 0, 0.0, a / c * 100)
+
+
+def _sma_dist(c, n):                  # % distance above/below the SMA (e.g. 200)
+    s = _sma(c, n)
+    return np.where(s == 0, np.nan, (c - s) / s * 100)
+
+
+def _supertrend_pos(h, l, c, n=10, mult=3.0):
+    a = _atr(h, l, c, n)
+    return np.where(a == 0, 0.0, (c - _sma(c, n)) / a)   # ATR-normalized trend position
+
+
+def _obv_slope(c, v, n):              # On-Balance Volume momentum (accumulation)
+    obv = np.zeros(len(c))
+    for i in range(1, len(c)):
+        obv[i] = obv[i - 1] + (v[i] if c[i] > c[i - 1] else -v[i] if c[i] < c[i - 1] else 0)
+    out = np.full(len(c), np.nan)
+    out[n:] = (obv[n:] - obv[:-n]) / (np.abs(obv[:-n]) + 1e-9)
+    return out
+
+
+def _vwap_dist(h, l, c, v, n):        # % distance from rolling VWAP
+    tp = (h + l + c) / 3
+    pv, out = tp * v, np.full(len(c), np.nan)
+    for i in range(n - 1, len(c)):
+        vol = v[i - n + 1:i + 1].sum()
+        if vol > 0:
+            vwap = pv[i - n + 1:i + 1].sum() / vol
+            out[i] = (c[i] - vwap) / vwap * 100
+    return out
+
+
+def _cvd_slope(o, c, v, n):           # cumulative volume delta proxy (buy vs sell pressure)
+    delta = np.where(c > o, v, np.where(c < o, -v, 0.0))
+    cvd = np.cumsum(delta)
+    out = np.full(len(c), np.nan)
+    out[n:] = (cvd[n:] - cvd[:-n]) / (np.abs(cvd[:-n]) + 1e-9)
+    return out
+
+
+# Full battery, grouped by family (combine ACROSS families, per the operator's note).
 def battery(o, h, l, c, v) -> dict:
     return {
-        "rsi_7": _rsi(c, 7), "rsi_14": _rsi(c, 14), "rsi_21": _rsi(c, 21),
-        "rsi_28": _rsi(c, 28),
-        "stoch_14": _stoch_k(c, h, l, 14), "stoch_21": _stoch_k(c, h, l, 21),
-        "williams_14": _williams(c, h, l, 14),
-        "cci_20": _cci(c, h, l, 20),
-        "roc_10": _roc(c, 10), "roc_20": _roc(c, 20),
-        "mfi_14": _mfi(c, h, l, v, 14),
-        "ema_cross_9_21": _ema_cross(c, 9, 21),
+        # momentum / oscillators
+        "rsi_14": _rsi(c, 14), "rsi_21": _rsi(c, 21),
+        "stoch_rsi_14": _stoch_rsi(c, 14), "stoch_14": _stoch_k(c, h, l, 14),
+        "macd_hist": _macd_hist(c), "cci_20": _cci(c, h, l, 20),
+        "williams_14": _williams(c, h, l, 14), "roc_10": _roc(c, 10), "roc_20": _roc(c, 20),
+        # volatility
+        "bb_pctb_20": _bb_pctb(c, 20), "bb_width_20": _bb_width(c, 20),
+        "keltner_pos_20": _keltner_pos(h, l, c, 20), "atr_pct_14": _atr_pct(h, l, c, 14),
+        # trend
+        "ema_cross_21_50": _ema_cross(c, 21, 50), "ema_cross_50_200": _ema_cross(c, 50, 200),
+        "sma_dist_200": _sma_dist(c, 200), "supertrend_10": _supertrend_pos(h, l, c, 10),
+        # volume
+        "mfi_14": _mfi(c, h, l, v, 14), "obv_slope_14": _obv_slope(c, v, 14),
+        "vwap_dist_20": _vwap_dist(h, l, c, v, 20), "cvd_slope_14": _cvd_slope(o, c, v, 14),
     }
 
 
-PERIODS = {"rsi_7": 7, "rsi_14": 14, "rsi_21": 21, "rsi_28": 28, "stoch_14": 14,
-           "stoch_21": 21, "williams_14": 14, "cci_20": 20, "roc_10": 10,
-           "roc_20": 20, "mfi_14": 14, "ema_cross_9_21": 21}
+FAMILY = {
+    "rsi_14": "momentum", "rsi_21": "momentum", "stoch_rsi_14": "momentum",
+    "stoch_14": "momentum", "macd_hist": "momentum", "cci_20": "momentum",
+    "williams_14": "momentum", "roc_10": "momentum", "roc_20": "momentum",
+    "bb_pctb_20": "volatility", "bb_width_20": "volatility",
+    "keltner_pos_20": "volatility", "atr_pct_14": "volatility",
+    "ema_cross_21_50": "trend", "ema_cross_50_200": "trend",
+    "sma_dist_200": "trend", "supertrend_10": "trend",
+    "mfi_14": "volume", "obv_slope_14": "volume", "vwap_dist_20": "volume",
+    "cvd_slope_14": "volume",
+}
+PERIODS = {"rsi_14": 14, "rsi_21": 21, "stoch_rsi_14": 14, "stoch_14": 14,
+           "macd_hist": 26, "cci_20": 20, "williams_14": 14, "roc_10": 10, "roc_20": 20,
+           "bb_pctb_20": 20, "bb_width_20": 20, "keltner_pos_20": 20, "atr_pct_14": 14,
+           "ema_cross_21_50": 50, "ema_cross_50_200": 200, "sma_dist_200": 200,
+           "supertrend_10": 10, "mfi_14": 14, "obv_slope_14": 14, "vwap_dist_20": 20,
+           "cvd_slope_14": 14}
 
 
 def compute_one(name: str, o, h, l, c, v) -> np.ndarray:
-    """Compute a single named oscillator (used live to evaluate the tuned winners)."""
+    """Compute a single named indicator (used live to evaluate the tuned winners)."""
     return battery(o, h, l, c, v).get(name, np.full(len(c), np.nan))
 
 
@@ -192,28 +310,53 @@ def tune_signals(klines: list, *, swing_w: int = 12, tol: int = 6) -> dict:
     for name, series in bat.items():
         st = score_signal(series, tops, tol, side="top")
         sb = score_signal(series, bottoms, tol, side="bottom")
-        top_rank.append({"name": name, "period": PERIODS[name], **st})
-        bot_rank.append({"name": name, "period": PERIODS[name], **sb})
+        top_rank.append({"name": name, "family": FAMILY[name], "period": PERIODS[name], **st})
+        bot_rank.append({"name": name, "family": FAMILY[name], "period": PERIODS[name], **sb})
     top_rank.sort(key=lambda d: d["auc"], reverse=True)
     bot_rank.sort(key=lambda d: d["auc"], reverse=True)
+
+    def best_per_family(rank):
+        seen, out = set(), []
+        for d in rank:                       # rank already sorted by AUC desc
+            if d["family"] not in seen and d["threshold"] is not None:
+                seen.add(d["family"]); out.append(d)
+        return out
+
     return {
         "bars": len(c), "swing_w": swing_w, "tol": tol,
         "n_tops": len(tops), "n_bottoms": len(bottoms),
         "top_leaderboard": top_rank, "bottom_leaderboard": bot_rank,
-        "best_top": top_rank[0] if top_rank else None,
-        "best_bottom": bot_rank[0] if bot_rank else None,
+        "top_by_family": best_per_family(top_rank),     # the "one from each family" combo
+        "bottom_by_family": best_per_family(bot_rank),
+        "best_top": next((d for d in top_rank if d["threshold"] is not None), None),
+        "best_bottom": next((d for d in bot_rank if d["threshold"] is not None), None),
     }
 
 
-def run_tune(symbol: str, *, timeframe: str = "1h", weeks: float = 8.0,
-             out_path: str = SIGNALS_PATH, stamp: str = "") -> dict:
-    """Fetch ~`weeks` of candles, tune, and persist the winners. Returns the result."""
+def run_tune(symbol: str, *, timeframes=("5m", "1h", "4h", "1d"), live_tf: str = "1h",
+             weeks: float = 8.0, out_path: str = SIGNALS_PATH, stamp: str = "",
+             swing_w: int = 12, tol: int = 6) -> dict:
+    """Backtest the battery across MULTIPLE timeframes (5m/1h/4h/1d), pick per-family
+    and overall winners on each, and persist. The live detector uses the ``live_tf``
+    winners (must match the monitor's trend timeframe). Returns the full result."""
     from .exchange import public_klines
-    per_week = {"15m": 672, "1h": 168, "4h": 42, "1d": 7}.get(timeframe, 168)
-    limit = min(1000, int(per_week * weeks) + 50)
-    klines = public_klines(symbol, timeframe, limit)
-    res = tune_signals(klines)
-    res.update(symbol=symbol, timeframe=timeframe, weeks=weeks, as_of=stamp)
+    per_tf = {}
+    for tf in timeframes:
+        try:
+            kl = public_klines(symbol, tf, 1000)        # Binance max; deepest history per TF
+            per_tf[tf] = tune_signals(kl, swing_w=swing_w, tol=tol)
+        except Exception as e:  # noqa: BLE001 - skip a TF that fails, keep the rest
+            log.warning("tune %s failed: %s", tf, e)
+    live = per_tf.get(live_tf) or (next(iter(per_tf.values())) if per_tf else None)
+    keep = ("bars", "n_tops", "n_bottoms", "best_top", "best_bottom",
+            "top_by_family", "bottom_by_family")
+    res = {
+        "symbol": symbol, "as_of": stamp, "weeks": weeks, "live_tf": live_tf,
+        "timeframes": list(per_tf),
+        "best_top": live["best_top"] if live else None,        # used live on live_tf
+        "best_bottom": live["best_bottom"] if live else None,
+        "per_timeframe": {tf: {k: r[k] for k in keep} for tf, r in per_tf.items()},
+    }
     try:
         with open(out_path, "w") as f:
             json.dump(res, f, indent=2)
@@ -231,14 +374,21 @@ def load_tuned(path: str = SIGNALS_PATH) -> dict | None:
 
 
 def leaderboard_text(res: dict) -> str:
-    def row(d):
-        th = "" if d["threshold"] is None else f" thr={d['threshold']}"
-        return f"  {d['name']:<14} AUC {d['auc']:.2f}  F1 {d['f1']:.2f}{th}"
-    lt = "\n".join(row(d) for d in res["top_leaderboard"][:5])
-    lb = "\n".join(row(d) for d in res["bottom_leaderboard"][:5])
-    return (f"Tuned on {res.get('bars','?')} {res.get('timeframe','')} bars "
-            f"({res.get('n_tops','?')} tops, {res.get('n_bottoms','?')} bottoms)\n"
-            f"BEST TOP caller: {res['best_top']['name']} (AUC {res['best_top']['auc']:.2f})\n"
-            f"{lt}\n"
-            f"BEST BOTTOM caller: {res['best_bottom']['name']} (AUC {res['best_bottom']['auc']:.2f})\n"
-            f"{lb}")
+    def fam(items):
+        return "\n".join(f"    [{d['family']:<10}] {d['name']:<16} "
+                         f"AUC {d['auc']:.2f} F1 {d['f1']:.2f} thr {d['threshold']}"
+                         for d in items[:5])
+    lines = [f"🔬 Signal tune — {res.get('symbol','')}  (live TF {res.get('live_tf','')})"]
+    bt, bb = res.get("best_top"), res.get("best_bottom")
+    if bt:
+        lines.append(f"LIVE top-caller:    {bt['name']} ({bt['family']}, AUC {bt['auc']:.2f})")
+    if bb:
+        lines.append(f"LIVE bottom-caller: {bb['name']} ({bb['family']}, AUC {bb['auc']:.2f})")
+    for tf, r in res.get("per_timeframe", {}).items():
+        lines.append(f"\n— {tf}: {r['n_tops']} tops / {r['n_bottoms']} bottoms "
+                     f"({r['bars']} bars) —")
+        lines.append("  best TOP-caller per family:")
+        lines.append(fam(r["top_by_family"]))
+        lines.append("  best BOTTOM-caller per family:")
+        lines.append(fam(r["bottom_by_family"]))
+    return "\n".join(lines)
