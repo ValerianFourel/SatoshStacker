@@ -54,68 +54,6 @@ Milestone-2 entrypoints: `python -m agent.main --mode dry_run --cycles N` (paper
 public prices), `--status`, `--clear-halt`, `--reset`. Replay the live loop over history:
 `python3 backtest/replay.py 2022_bear_full`.
 
-## Alt-stacker — multi-asset LLM trader (SOL / ETH / HYPE / GOLD) on KRAKEN — separate from BTC
-
-A second, independent agent. **Operator's goal: MAKE USD by trading ZEC/USD — NOT accumulate it;
-accumulate OUNCES of gold (hedge). BTC is the opposite — the separate BTC bots accumulate
-satoshis.** (Asset journey: SOL/ETH/HYPE dropped — can't make USD on fallers; XMR & TRX/BNB
-dropped; settled on **ZEC (Zcash)**, EU-tradeable on Kraken — `ZEC/USD`, unlike Monero.) Built by
-generalizing the active BTC `agent/trader.py` into a **portfolio sharing ONE USD cash pot** on
-Kraken. Venue split: **alts on Kraken, BTC on Binance**. Own `ALT_MODE`/`ALT_VENUE` env. **Decoupled
-cadence: decide every `ALT_CYCLE_HOURS`, news/F&G every `ALT_NEWS_EVERY_HOURS` (8h).** ⚠️ The study
-(below) says **DAILY beats every intraday cadence decisively** — use `ALT_CYCLE_HOURS=24`, NOT scalp.
-
-- **Objectives** (`AssetSpec.objective`): `accumulate_quote` = **make USD** (**ZEC** — grow the
-  quote; spot-only; ride confirmed uptrends, bank profits, cash in downtrends, never bag-hold), and
-  `store_of_value` (PAXG/XAUT **gold** — accumulate ounces; units-benchmarked). `accumulate_base`
-  (most units) exists but no alt uses it. Max exposure ≤0.6 ("LLM decides"); cage stops extremes.
-  Default `ALT_ASSETS=ZEC:accumulate_quote:0.6,PAXG:store_of_value:0.5`.
-- **LLM has FULL decision authority** (operator's choice) but only INSIDE a deterministic cage
-  (`Rails`): per-asset `max_fraction`, per-cycle + per-day turnover caps, total-allocation clamp,
-  USDC de-peg halt, price-sanity bad-tick guard, MIN_NOTIONAL, consecutive-API-failure halt,
-  kill switch, spot-only, withdrawals-disabled key. A broken/malformed LLM reply ⇒ **HOLD**
-  (no churn). This is a deliberate departure from the BTC bot's advisory-only LLM — documented,
-  not audited to the same bar yet (see status).
-- **One SEQUENTIAL LLM call per asset** (each decision + rationale observable), each fed that
-  asset's own momentum, **per-asset sentiment** (Yahoo headlines + market Fear&Greed), and its
-  **weekly self-tuned technicals** (`agent/technicals_<BASE>.json` via `tune.run_tune`).
-- **Per-asset shadow benchmarks** (DCA + HODL on units for SOL/ETH; realized-USDC vs hold-HYPE
-  for HYPE) in the daily/weekly Telegram report.
-
-New modules: `agent/multi_exchange.py` (shared-cash paper + ccxt multi-symbol, **venue-aware**:
-binance|kraken, public price/candle feeds), `agent/alts.py` (the `AltStacker`, cage, sequential
-decisions, tune, benchmarks, **reconcile-against-exchange**), `agent/alts_main.py` (CLI).
-Tests: `tests/test_alts.py` (cage + rebalance + audit-fix regressions, 18 tests).
-Entrypoints: `python -m agent.alts_main --mode dry_run --once|--cycles N`, `--status`,
-`--preflight`, `--clear-halt`, `--reset`. Config is `.env`-driven (`ALT_*`, `AltConfig.from_env`).
-Deploy unit: `deploy/satoshistacker-alts.service`.
-
-> **HYPE venue — resolved on Kraken.** HYPE is **not on Binance spot** (`HYPE/USDC`/`HYPE/USDT`
-> both 404), but **Kraken lists SOL/ETH/HYPE — all vs USD**. So `ALT_VENUE=kraken` runs the whole
-> alt-stacker on one venue with a shared **USD** cash pot ("accumulate USDC via HYPE" → "accumulate
-> USD via HYPE"). Trade-off: **Kraken has no spot testnet**, so its path is `dry_run` → small `live`
-> (no testnet rehearsal). `ALT_VENUE=binance` remains available for a SOL/ETH-only testnet run.
-> De-peg halt auto-disables for a fiat (USD) quote; Kraken live keys = `KRAKEN_API_KEY/SECRET`.
-
-**Adversarial safety audit (27 agents) — done; all confirmed findings fixed + regression-tested.**
-21 findings (1 CRITICAL, 8 HIGH, 8 MED, 4 LOW); the CRITICAL + ~9 were one root cause (no
-reconcile + wall-clock coid + position persisted after the order = torn-write double-buy). Fixes:
-- **Crash/double-trade:** `_reconcile_positions` makes the **exchange the source of truth for held
-  units** every cycle (assumes a dedicated account/sub-account); deterministic per-cycle-bucket
-  `clientOrderId`; fills are read from the actual order, not the requested size.
-- **Malformed-LLM containment:** a NaN/"nan"/inf/bool `target_fraction` now **HOLDs** (was clamping
-  to 1.0 = full deploy).
-- **Per-day turnover** derived from the trades log (crash-atomic), not an evadable counter.
-- **Anomaly halts:** one degraded-cycle counter + single alert; de-peg **fails closed** (skips
-  trading if the peg can't be verified) and is skipped for a fiat quote; bad-ticks now alert.
-- **Redaction:** `Notifier.send` runs `redact()`; untrusted LLM `stance` is sanitized before Markdown.
-
-**Status:** dry-run paper trader, audited + fixed, **19 alt tests (full suite 87 passing)**;
-verified live on Kraken (SOL/ETH/HYPE/PAXG — incl. HYPE @ ~$58, gold PAXG @ ~$4,120). **Still no historical backtest gate**
-for the alt thesis — required before live, mirroring BTC Milestone 1. Live gated identically
-(`--mode live` + `LIVE_TRADING_CONFIRMED=yes` + `backtest/results/ALT_GATE_PASSED` + key cannot
-withdraw).
-
 ## BTC watch — read-only monitor + LLM analyst + Telegram Q&A (`agent.btcwatch`)
 
 A **separate, non-trading** service (operator request): it continuously watches BTC on
@@ -262,24 +200,5 @@ pip install -r requirements.txt
 python3 backtest/fetch_data.py    # one-time: pull real Binance history
 python3 backtest/engine.py        # baselines + spine scoreboard + verdict
 python3 backtest/variants.py      # design search + audit-corrected honesty checks
-# Alt-stacker (Kraken; ZEC/USD make-USD + GOLD hedge) — reuses the exact alts sizing spine:
-python3 backtest/study_fetch.py --tfs 15m,30m,1h,4h,1d ZEC   # one-time: deep multi-tf Binance history
-python3 backtest/study_scalp.py            # ZEC: scalp vs daily, taker vs maker fee (make-USD?)
-python3 backtest/study_candles.py          # which candle + which technicals (TRX/BNB legacy study)
-python3 backtest/alt_engine.py --assets ZEC --timeframe 1d --strategy trend --write-gate
-python3 -m pytest tests/ -q       # 90 tests (incl. 22 alt: cage, spine, audit-fixes, gold)
+python3 -m pytest tests/ -q       # BTC accumulation + active trader + btcwatch tests
 ```
-
-**ZEC scalp study (`backtest/study_fetch.py` + `study_scalp.py` + `study_candles.py`; full record
-`backtest/ALT_AUDIT.md`).** Deep Binance public history 15m→1d; sweeps timeframe × strategy
-(trend vs mean-reversion) × fee (taker 0.26% / maker 0.16%) and ranks indicators by IC. Findings
-(ZEC, last 180d):
-- **INTRADAY SCALPING LOSES — the finer the worse.** 15m trend −54%(taker)/−30%(maker), 30m −27/−8,
-  1h +6/+19, 4h +24/+26; mean-reversion −39% to −94% everywhere. Round-trips pay 2× the per-side fee
-  → fees annihilate scalps. (Forcing a tiny rebalance band changes nothing — scalping loses on
-  merit.) **Do NOT scalp.**
-- **ONLY DAILY trend-following made USD:** 1d trend +28.5%(taker)/**+30.4%(maker)**, beating cash
-  (+0%) and DCA (+28.8%). Signal: positive IC (momentum persists), strongest at daily (ZEC rsi_28
-  IC≈0.20). The opposite of scalping.
-- **⚠️ Verification in progress** (adversarial workflow): the +30% daily-trend result may be ZEC's
-  recent rally — an out-of-sample / overfit check is running before this is trusted for live.
