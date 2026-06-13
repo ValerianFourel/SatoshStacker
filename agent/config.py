@@ -150,6 +150,9 @@ class WatchConfig:
     snapshot_path: str = "state/btc_snapshot.json"
     state_path: str = "state/btc_watch_state.json"  # detector cooldowns survive restarts
     onboarded_marker: str = "state/btc_watch_onboarded"  # one-time onboarding tip guard
+    tuned_signals_path: str = "agent/watch_signals.json"  # best top/bottom oscillators (--tune)
+    tune_timeframe: str = "1h"      # candle for --tune backtest
+    tune_weeks: float = 8.0         # lookback weeks for --tune
 
     @staticmethod
     def from_env() -> "WatchConfig":

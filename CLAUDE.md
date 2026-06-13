@@ -147,8 +147,17 @@ All off-box fetches are untrusted + failure-safe and can never trigger an action
 The analyst is read-only but may write notes/metrics to a **sandboxed scratch dir**
 (`scratch.py`, path-traversal-proof — never the repo/.env/exchange). Any LLM/network error
 fails safe to a deterministic numeric summary. All metric math + the detector + the
-chat-gate are unit-tested with zero network (`tests/test_btcwatch.py`, 17 tests).
-Run: `python -m agent.btcwatch [--once|--status|--test-telegram]`; deploy
+chat-gate are unit-tested with zero network (`tests/test_btcwatch.py`).
+
+**Signal tuning (`--tune`, `signal_tuner.py`).** Backtests a BATTERY of momentum oscillators
+(RSI 7/14/21/28, Stochastic, Williams %R, CCI, ROC, MFI, EMA-cross) over the past `--weeks`,
+labels real swing tops/bottoms (±swing_w extrema), and scores each by rank-AUC (+ best-F1
+threshold) at marking them. The top-AUC and bottom-AUC winners go to `agent/watch_signals.json`;
+the live detector then fires peaks/bottoms off the tuned signal+threshold (RSI defaults if absent).
+`python -m agent.btcwatch --tune [--weeks 8 --tf 1h]` (verified live: MFI(14) best top-caller,
+RSI(14) best bottom-caller on recent BTC).
+
+Run: `python -m agent.btcwatch [--once|--status|--test-telegram|--tune]`; deploy
 `deploy/satoshistacker-btcwatch.service`. Config: `WATCH_*` in `.env`.
 
 ## Backtest verdict (Milestone 1)
@@ -189,6 +198,7 @@ agent/
   market_monitor.py # public order book/volume/vol/technicals -> snapshot + anomaly detector [done]
   analyst.py        # read-only LLM (event reads + Q&A); NEVER buy/sell; news+search+scratch   [done]
   websearch.py      # keyless BTC news (Yahoo RSS) + Fear&Greed; web search Tavily/Serper/DDG  [done]
+  signal_tuner.py   # --tune: backtest oscillator battery -> best top/bottom callers -> json   [done]
   telegram_listener.py # inbound getUpdates, operator-chat-gated, routes to analyst           [done]
   scratch.py        # sandboxed scratch dir the analyst may write (path-traversal-proof)      [done]
   btcwatch.py       # entrypoint: monitor thread + Telegram Q&A, graceful shutdown            [done]

@@ -1,0 +1,249 @@
+{
+  "bars": 1000,
+  "swing_w": 12,
+  "tol": 6,
+  "n_tops": 27,
+  "n_bottoms": 26,
+  "top_leaderboard": [
+    {
+      "name": "mfi_14",
+      "period": 14,
+      "auc": 0.731,
+      "threshold": 58.05,
+      "f1": 0.51,
+      "precision": 0.551,
+      "recall": 0.475
+    },
+    {
+      "name": "ema_cross_9_21",
+      "period": 21,
+      "auc": 0.726,
+      "threshold": 0.12,
+      "f1": 0.519,
+      "precision": 0.563,
+      "recall": 0.481
+    },
+    {
+      "name": "roc_10",
+      "period": 10,
+      "auc": 0.718,
+      "threshold": 0.38,
+      "f1": 0.5,
+      "precision": 0.542,
+      "recall": 0.464
+    },
+    {
+      "name": "roc_20",
+      "period": 20,
+      "auc": 0.716,
+      "threshold": 0.49,
+      "f1": 0.497,
+      "precision": 0.534,
+      "recall": 0.464
+    },
+    {
+      "name": "rsi_14",
+      "period": 14,
+      "auc": 0.71,
+      "threshold": 56.92,
+      "f1": 0.513,
+      "precision": 0.554,
+      "recall": 0.478
+    },
+    {
+      "name": "rsi_21",
+      "period": 21,
+      "auc": 0.701,
+      "threshold": 55.97,
+      "f1": 0.5,
+      "precision": 0.537,
+      "recall": 0.467
+    },
+    {
+      "name": "cci_20",
+      "period": 20,
+      "auc": 0.685,
+      "threshold": 58.04,
+      "f1": 0.487,
+      "precision": 0.524,
+      "recall": 0.456
+    },
+    {
+      "name": "rsi_7",
+      "period": 7,
+      "auc": 0.668,
+      "threshold": 60.76,
+      "f1": 0.485,
+      "precision": 0.527,
+      "recall": 0.449
+    },
+    {
+      "name": "stoch_21",
+      "period": 21,
+      "auc": 0.666,
+      "threshold": 66.69,
+      "f1": 0.5,
+      "precision": 0.537,
+      "recall": 0.467
+    },
+    {
+      "name": "rsi_28",
+      "period": 28,
+      "auc": 0.657,
+      "threshold": 55.69,
+      "f1": 0.451,
+      "precision": 0.486,
+      "recall": 0.42
+    },
+    {
+      "name": "stoch_14",
+      "period": 14,
+      "auc": 0.643,
+      "threshold": 68.13,
+      "f1": 0.463,
+      "precision": 0.5,
+      "recall": 0.431
+    },
+    {
+      "name": "williams_14",
+      "period": 14,
+      "auc": 0.643,
+      "threshold": 68.13,
+      "f1": 0.463,
+      "precision": 0.5,
+      "recall": 0.431
+    }
+  ],
+  "bottom_leaderboard": [
+    {
+      "name": "rsi_14",
+      "period": 14,
+      "auc": 0.628,
+      "threshold": 38.8,
+      "f1": 0.41,
+      "precision": 0.439,
+      "recall": 0.385
+    },
+    {
+      "name": "roc_10",
+      "period": 10,
+      "auc": 0.618,
+      "threshold": -0.64,
+      "f1": 0.413,
+      "precision": 0.441,
+      "recall": 0.388
+    },
+    {
+      "name": "rsi_21",
+      "period": 21,
+      "auc": 0.612,
+      "threshold": 39.71,
+      "f1": 0.454,
+      "precision": 0.483,
+      "recall": 0.428
+    },
+    {
+      "name": "stoch_21",
+      "period": 21,
+      "auc": 0.608,
+      "threshold": 28.55,
+      "f1": 0.387,
+      "precision": 0.412,
+      "recall": 0.364
+    },
+    {
+      "name": "roc_20",
+      "period": 20,
+      "auc": 0.605,
+      "threshold": -1.12,
+      "f1": 0.453,
+      "precision": 0.483,
+      "recall": 0.426
+    },
+    {
+      "name": "mfi_14",
+      "period": 14,
+      "auc": 0.605,
+      "threshold": 36.73,
+      "f1": 0.388,
+      "precision": 0.416,
+      "recall": 0.364
+    },
+    {
+      "name": "cci_20",
+      "period": 20,
+      "auc": 0.601,
+      "threshold": -77.02,
+      "f1": 0.402,
+      "precision": 0.429,
+      "recall": 0.378
+    },
+    {
+      "name": "ema_cross_9_21",
+      "period": 21,
+      "auc": 0.597,
+      "threshold": -0.31,
+      "f1": 0.436,
+      "precision": 0.463,
+      "recall": 0.411
+    },
+    {
+      "name": "stoch_14",
+      "period": 14,
+      "auc": 0.589,
+      "threshold": 29.0,
+      "f1": 0.379,
+      "precision": 0.405,
+      "recall": 0.355
+    },
+    {
+      "name": "williams_14",
+      "period": 14,
+      "auc": 0.589,
+      "threshold": 29.0,
+      "f1": 0.379,
+      "precision": 0.405,
+      "recall": 0.355
+    },
+    {
+      "name": "rsi_7",
+      "period": 7,
+      "auc": 0.571,
+      "threshold": 35.21,
+      "f1": 0.368,
+      "precision": 0.393,
+      "recall": 0.346
+    },
+    {
+      "name": "rsi_28",
+      "period": 28,
+      "auc": 0.566,
+      "threshold": 39.91,
+      "f1": 0.412,
+      "precision": 0.435,
+      "recall": 0.391
+    }
+  ],
+  "best_top": {
+    "name": "mfi_14",
+    "period": 14,
+    "auc": 0.731,
+    "threshold": 58.05,
+    "f1": 0.51,
+    "precision": 0.551,
+    "recall": 0.475
+  },
+  "best_bottom": {
+    "name": "rsi_14",
+    "period": 14,
+    "auc": 0.628,
+    "threshold": 38.8,
+    "f1": 0.41,
+    "precision": 0.439,
+    "recall": 0.385
+  },
+  "symbol": "BTC/USDT",
+  "timeframe": "1h",
+  "weeks": 8.0,
+  "as_of": "2026-06-13T00:13:03.424801+00:00"
+}

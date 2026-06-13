@@ -108,11 +108,32 @@ def book_metrics(order_book: dict, *, bands_pct=(0.5, 1.0, 2.0)) -> dict:
     return out
 
 
+def _tuned_values(klines_trend, tuned: dict) -> dict:
+    """Current reading of the tuned best top/bottom oscillators (from signal_tuner)."""
+    from .signal_tuner import compute_one
+    a = np.array(klines_trend, dtype=float)
+    o, h, l, c, vv = a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5]
+    out = {}
+    for side in ("best_top", "best_bottom"):
+        sig = tuned.get(side)
+        if not sig or sig.get("threshold") is None:
+            continue
+        series = compute_one(sig["name"], o, h, l, c, vv)
+        val = series[~np.isnan(series)]
+        if len(val):
+            out["top" if side == "best_top" else "bottom"] = {
+                "name": sig["name"], "value": round(float(val[-1]), 2),
+                "threshold": sig["threshold"], "auc": sig.get("auc")}
+    return out
+
+
 def compute_metrics(*, price: float, klines_fast: list[list[float]],
                     klines_trend: list[list[float]], order_book: dict,
-                    cfg: WatchConfig, now_ts: float) -> dict:
+                    cfg: WatchConfig, now_ts: float, tuned: dict | None = None) -> dict:
     """Build the full metric snapshot. klines rows are
-    [open_time_ms, open, high, low, close, volume]. Pure — no network."""
+    [open_time_ms, open, high, low, close, volume]. Pure — no network.
+    If ``tuned`` (from signal_tuner) is given, the backtest-chosen top/bottom
+    oscillators' current values are added under ``m['tuned']``."""
     f = np.array(klines_fast, dtype=float) if klines_fast else np.empty((0, 6))
     t = np.array(klines_trend, dtype=float) if klines_trend else np.empty((0, 6))
     fc = f[:, 4] if len(f) else np.array([price])
@@ -139,7 +160,7 @@ def compute_metrics(*, price: float, klines_fast: list[list[float]],
     rsi = round(_rsi(tc, 14), 1)
     ema_fast, ema_slow = _ema(tc, 9), _ema(tc, 21)
 
-    return {
+    m = {
         "ts": now_ts,
         "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
         "symbol": cfg.symbol,
@@ -167,6 +188,11 @@ def compute_metrics(*, price: float, klines_fast: list[list[float]],
         },
         "order_book": book_metrics(order_book, bands_pct=cfg.depth_bands_pct),
     }
+    if tuned:
+        tv = _tuned_values(klines_trend, tuned)
+        if tv:
+            m["tuned"] = tv
+    return m
 
 
 # ───────────────────────── anomaly detection (stateful) ──────────────────────
@@ -197,11 +223,25 @@ class AnomalyDetector:
         out: list[Signal] = []
         near_high = tech["pct_from_high_24h"] >= -c.near_extreme_pct
         near_low = tech["pct_from_low_24h"] <= c.near_extreme_pct
-        if near_high and tech["rsi_14"] >= c.rsi_overbought:
+        tuned = m.get("tuned", {})
+        tp, bt = tuned.get("top"), tuned.get("bottom")
+        # TOP: tuned backtest-winner if present, else the default RSI+near-high rule
+        if tp:
+            if tp["value"] >= tp["threshold"]:
+                out.append(Signal("peak", "peak",
+                    f"price ${m['price']:,.0f} — {tp['name']}={tp['value']} ≥ "
+                    f"{tp['threshold']} (tuned top-caller, AUC {tp.get('auc')})"))
+        elif near_high and tech["rsi_14"] >= c.rsi_overbought:
             out.append(Signal("peak", "peak",
                 f"price ${m['price']:,.0f} at 24h-high (RSI {tech['rsi_14']}, "
                 f"{tech['pct_from_high_24h']:+.2f}% from high)"))
-        if near_low and tech["rsi_14"] <= c.rsi_oversold:
+        # BOTTOM: tuned winner if present, else default RSI+near-low rule
+        if bt:
+            if bt["value"] <= bt["threshold"]:
+                out.append(Signal("bottom", "bottom",
+                    f"price ${m['price']:,.0f} — {bt['name']}={bt['value']} ≤ "
+                    f"{bt['threshold']} (tuned bottom-caller, AUC {bt.get('auc')})"))
+        elif near_low and tech["rsi_14"] <= c.rsi_oversold:
             out.append(Signal("bottom", "bottom",
                 f"price ${m['price']:,.0f} at 24h-low (RSI {tech['rsi_14']}, "
                 f"{tech['pct_from_low_24h']:+.2f}% from low)"))
@@ -310,8 +350,10 @@ class MarketMonitor:
         fast = self.klines_fn(self.cfg.kline_tf, self.cfg.kline_limit)
         trend = self.klines_fn(self.cfg.trend_tf, self.cfg.trend_limit)
         book = self.book_fn()
+        from .signal_tuner import load_tuned
+        tuned = load_tuned(self.cfg.tuned_signals_path)
         m = compute_metrics(price=price, klines_fast=fast, klines_trend=trend,
-                            order_book=book, cfg=self.cfg, now_ts=now)
+                            order_book=book, cfg=self.cfg, now_ts=now, tuned=tuned)
         fired = self.detector.evaluate(m, now_ts=now)
         m["events"] = [s.name for s in fired]
         _atomic_write_json(self.cfg.snapshot_path, m)

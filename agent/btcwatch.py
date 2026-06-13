@@ -80,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--once", action="store_true", help="one scan, print, exit")
     p.add_argument("--status", action="store_true", help="print last snapshot, exit")
     p.add_argument("--test-telegram", action="store_true", help="send a test msg, exit")
+    p.add_argument("--tune", action="store_true",
+                   help="backtest momentum oscillators for top/bottom calling, save winners, exit")
+    p.add_argument("--weeks", type=float, default=None, help="--tune lookback (weeks)")
+    p.add_argument("--tf", default=None, help="--tune candle timeframe (e.g. 1h, 4h)")
     args = p.parse_args(argv)
 
     _load_env()
@@ -92,6 +96,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.status:
         print(numeric_summary(monitor.latest_snapshot() or {}))
+        return 0
+    if args.tune:
+        import datetime
+        from .signal_tuner import leaderboard_text, run_tune
+        res = run_tune(cfg.symbol, timeframe=args.tf or cfg.tune_timeframe,
+                       weeks=args.weeks or cfg.tune_weeks,
+                       out_path=cfg.tuned_signals_path,
+                       stamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        txt = leaderboard_text(res)
+        print(txt + f"\n\nsaved -> {cfg.tuned_signals_path} (live detector will use these)")
+        notifier.send("🔬 *Signal tune complete* — live detector now uses these.\n" + txt)
         return 0
     if args.test_telegram:
         notifier.send("✅ SatoshiStacker BTC watch: Telegram OK (read-only monitor).")

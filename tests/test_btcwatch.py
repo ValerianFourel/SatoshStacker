@@ -5,6 +5,7 @@ cycle, and the Telegram listener routing + operator-chat gating.
 Deterministic — no network, no LLM (data injected, MockAnalyst used)."""
 import json
 
+import numpy as np
 import pytest
 
 from agent.analyst import MockAnalyst, numeric_summary
@@ -318,6 +319,44 @@ def test_analyst_passes_llm_extracted_dates_to_search():
     assert cap["after"] == "2026-01-01" and cap["before"] == "2026-02-01"
     assert "flows were positive" in out and "2026-01-01" in out  # window shown
     assert "today" in calls[0]                              # today injected for relative dates
+
+
+# ── signal tuner (battery backtest for top/bottom calling) ──
+def test_tuner_ranks_battery_on_cyclical_data():
+    from agent.signal_tuner import tune_signals
+    n, period = 320, 40
+    klines = []
+    for i in range(n):
+        c = 100 + 10 * np.sin(i * 2 * np.pi / period)
+        klines.append([float(i), c, c + 0.5, c - 0.5, c, 1000.0])
+    res = tune_signals(klines, swing_w=8, tol=4)
+    assert res["n_tops"] > 3 and res["n_bottoms"] > 3
+    assert len(res["top_leaderboard"]) >= 10        # the whole battery is scored
+    assert res["best_top"]["auc"] > 0.7             # a strong top-caller is found
+    assert res["best_bottom"]["auc"] > 0.7          # ...and a bottom-caller
+
+
+def test_compute_metrics_includes_tuned_values():
+    tuned = {"best_top": {"name": "rsi_14", "threshold": 70.0, "auc": 0.8},
+             "best_bottom": {"name": "rsi_14", "threshold": 30.0, "auc": 0.8}}
+    m = compute_metrics(price=110_000.0, klines_fast=flat_fast(),
+                        klines_trend=trend_klines(), order_book=book(),
+                        cfg=WatchConfig(), now_ts=1.0, tuned=tuned)
+    assert m["tuned"]["top"]["name"] == "rsi_14"
+    assert m["tuned"]["top"]["value"] > 90          # rising trend -> RSI ~100
+
+
+def test_detector_uses_tuned_signals_over_defaults():
+    det = AnomalyDetector(WatchConfig())
+    m = make_metrics()                               # RSI 50, not near 24h high
+    m["tuned"] = {"top": {"name": "rsi_14", "value": 85.0,
+                          "threshold": 70.0, "auc": 0.8}}
+    assert "peak" in [s.name for s in det.evaluate(m, now_ts=0.0)]
+    det2 = AnomalyDetector(WatchConfig())
+    m2 = make_metrics()
+    m2["tuned"] = {"bottom": {"name": "stoch_14", "value": 8.0,
+                              "threshold": 20.0, "auc": 0.8}}
+    assert "bottom" in [s.name for s in det2.evaluate(m2, now_ts=0.0)]
 
 
 def test_first_launch_onboarding_sends_once(tmp_path):
