@@ -137,6 +137,7 @@ def _features(m: dict) -> dict:
         "futures": m.get("futures"),
         "tuned_signals": m.get("tuned"),
         "stacking_levels": _stacking_levels(m),   # structural reentry/sell zones
+        "onchain": m.get("onchain") or None,       # MVRV/NUPL/SOPR/netflow (cycle-level)
         "events_fired": m.get("events"),
     }
 

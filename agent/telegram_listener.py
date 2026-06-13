@@ -28,6 +28,7 @@ _HELP = (
     "`/chart` — price + the leading indicators, plotted\n"
     "`/derivs` (or `/liq`) — funding · open interest · long/short · taker flow\n"
     "`/levels` — good reentry (buy) & sell zones for stacking sats\n"
+    "`/onchain` — MVRV · NUPL · SOPR · netflow (CryptoQuant)\n"
     "`/news` — BTC headlines + Fear&Greed (day/week/month)\n"
     "`/alert <metric> <op> <value>` — custom trigger, e.g. `/alert rsi > 70` "
     "(or _ping me when rsi above 70_) · `/alerts` · `/delalert <id>`\n"
@@ -146,6 +147,9 @@ class TelegramListener:
         if low in ("/levels", "/entry", "/sell", "/buy"):
             from .levels import levels_text
             return levels_text(snap) if snap else "no snapshot yet — warming up"
+        if low in ("/onchain", "/mvrv", "/sopr", "/nupl"):
+            from .onchain import onchain_text
+            return onchain_text((snap or {}).get("onchain") or {})
         if low == "/news":
             from .websearch import news_line
             return news_line(self.news_fn()) if self.news_fn else "news disabled"

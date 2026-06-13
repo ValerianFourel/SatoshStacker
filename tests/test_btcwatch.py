@@ -481,6 +481,13 @@ def test_derivs_chart_renders():
     assert "derivatives" in cap.lower() and "Coinglass" in cap
 
 
+def test_onchain_text_status():
+    from agent.onchain import onchain_text
+    assert "unavailable" in onchain_text({})                 # no plan access -> honest status
+    t = onchain_text({"mvrv": 2.1, "sopr": 1.0})
+    assert "MVRV" in t and "2.1" in t
+
+
 def test_detector_long_short_extreme():
     det = AnomalyDetector(WatchConfig())
     m = make_metrics()

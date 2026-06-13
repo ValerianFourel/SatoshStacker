@@ -390,6 +390,8 @@ class MarketMonitor:
         self.detector = AnomalyDetector(cfg)
         self._mtf_cache: dict = {}
         self._mtf_ts: float = 0.0
+        self._oc_cache: dict = {}
+        self._oc_ts: float = 0.0
         from .alerts import AlertStore
         self.alerts = AlertStore(cfg.user_alerts_path)
         self._load_state()
@@ -425,6 +427,19 @@ class MarketMonitor:
                 continue
         self._mtf_cache, self._mtf_ts = out, now
         return out
+
+    def _onchain(self, now: float) -> dict:
+        """CryptoQuant on-chain metrics, cached ~4h (daily data; needs a plan that grants
+        the endpoints — empty until then)."""
+        if self._oc_cache and now - self._oc_ts < 14400:
+            return self._oc_cache
+        try:
+            from .onchain import fetch_onchain
+            self._oc_cache = fetch_onchain()
+        except Exception:  # noqa: BLE001
+            self._oc_cache = {}
+        self._oc_ts = now
+        return self._oc_cache
 
     def _load_state(self) -> None:
         self._sched: dict = {}        # {tz: last-fired YYYY-MM-DD} for the daily digest
@@ -508,6 +523,7 @@ class MarketMonitor:
                             order_book=book, cfg=self.cfg, now_ts=now, tuned=tuned,
                             ticker24=ticker24, funding=funding)
         m["multi_tf"] = self._multi_tf(now)        # RSI/trend per 5m/1h/4h/1d (cached)
+        m["onchain"] = self._onchain(now)          # MVRV/NUPL/SOPR/netflow (cached ~4h)
         fired = self.detector.evaluate(m, now_ts=now)
         m["events"] = [s.name for s in fired]
         _atomic_write_json(self.cfg.snapshot_path, m)
