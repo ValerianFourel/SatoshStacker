@@ -256,6 +256,8 @@ class AnomalyDetector:
     cfg: WatchConfig
     level: "str | None" = None     # None -> raw cfg thresholds (tests); else a preset name
     muted: bool = False            # True -> no proactive alerts at all
+    overrides: dict = field(default_factory=dict)  # manual per-bar overrides (preset key -> val)
+    disabled: tuple = ()           # Signal.name values the user turned off (e.g. book_imbalance)
     # per-signal state: {"last_fired": ts, "armed": bool, "clear_since": ts|None}
     _state: dict = field(default_factory=dict)
 
@@ -268,15 +270,21 @@ class AnomalyDetector:
 
     def _thr(self) -> dict:
         """Active threshold set: a sensitivity preset when ``level`` is set, else the raw
-        cfg fields (keeps unit tests deterministic)."""
+        cfg fields (keeps unit tests deterministic) — with manual overrides merged on top."""
         if self.level:
             from .sensitivity import resolve
-            return resolve(self.level)
-        c = self.cfg
-        return {"rsi_ob": c.rsi_overbought, "rsi_os": c.rsi_oversold, "vol_z": c.vol_z_threshold,
-                "ret_z": c.ret_z_threshold, "near": c.near_extreme_pct, "imb": c.imbalance_threshold,
-                "fund": c.funding_extreme_pct, "oi": c.oi_spike_pct, "ls_long": 2.0, "ls_short": 0.6,
-                "cooldown": c.alert_cooldown_s, "rearm": c.rearm_clear_s}
+            base = dict(resolve(self.level))
+        else:
+            c = self.cfg
+            base = {"rsi_ob": c.rsi_overbought, "rsi_os": c.rsi_oversold, "vol_z": c.vol_z_threshold,
+                    "ret_z": c.ret_z_threshold, "near": c.near_extreme_pct,
+                    "imb": c.imbalance_threshold, "fund": c.funding_extreme_pct, "oi": c.oi_spike_pct,
+                    "ls_long": 2.0, "ls_short": 0.6,
+                    "cooldown": c.alert_cooldown_s, "rearm": c.rearm_clear_s}
+        for k, v in (self.overrides or {}).items():
+            if k in base:
+                base[k] = v
+        return base
 
     def _conditions(self, m: dict) -> list[Signal]:
         tech, vol, book = m["technicals"], m["volume"], m.get("order_book", {})
@@ -339,6 +347,8 @@ class AnomalyDetector:
             crowd = "crowded LONG (retail)" if lsr >= T["ls_long"] else "crowded SHORT (retail)"
             out.append(Signal("long_short_extreme", "spike",
                 f"long/short ratio {lsr:.2f} — {crowd}"))
+        if self.disabled:                       # user turned specific signals off
+            out = [s for s in out if s.name not in self.disabled]
         return out
 
     def evaluate(self, m: dict, *, now_ts: float) -> list[Signal]:
@@ -438,6 +448,8 @@ class MarketMonitor:
         p = read_prefs(path, default_level=self.cfg.sensitivity)
         self.detector.level = p["sensitivity"]
         self.detector.muted = p["muted"]
+        self.detector.overrides = p["overrides"]
+        self.detector.disabled = tuple(p["disabled"])
 
     def _check_user_alerts(self, m: dict) -> None:
         """Evaluate user-defined trigger rules against the live snapshot; ping on fire."""

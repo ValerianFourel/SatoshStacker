@@ -23,21 +23,61 @@ PRESETS = {
 }
 ORDER = ("low", "normal", "high")          # quiet -> chatty
 
+# friendly name -> canonical threshold key (for `/sensitivity set <key> <value>`)
+KEY_ALIAS = {
+    "imb": "imb", "imbalance": "imb", "book": "imb",
+    "fund": "fund", "funding": "fund",
+    "vol": "vol_z", "volume": "vol_z", "vol_z": "vol_z",
+    "ret": "ret_z", "return": "ret_z", "ret_z": "ret_z",
+    "rsi_ob": "rsi_ob", "overbought": "rsi_ob", "rsi_top": "rsi_ob", "top": "rsi_ob",
+    "rsi_os": "rsi_os", "oversold": "rsi_os", "rsi_bottom": "rsi_os", "bottom": "rsi_os",
+    "oi": "oi", "near": "near", "ls_long": "ls_long", "ls_short": "ls_short",
+    "cooldown": "cooldown", "rearm": "rearm",
+}
+MIN_KEYS = {"cooldown", "rearm"}           # set/displayed in minutes, stored in seconds
+
+# friendly name -> canonical Signal.name (for `/sensitivity off <signal>`)
+SIGNAL_ALIAS = {
+    "imbalance": "book_imbalance", "book": "book_imbalance", "book_imbalance": "book_imbalance",
+    "funding": "funding_extreme", "funding_extreme": "funding_extreme",
+    "oi": "oi_spike", "oi_spike": "oi_spike",
+    "long_short": "long_short_extreme", "ls": "long_short_extreme",
+    "long_short_extreme": "long_short_extreme",
+    "volume": "volume_spike", "volume_spike": "volume_spike",
+    "peak": "peak", "top": "peak", "bottom": "bottom",
+    "spike_up": "price_spike_up", "price_spike_up": "price_spike_up",
+    "spike_down": "price_spike_down", "price_spike_down": "price_spike_down",
+}
+
 
 def resolve(level: str | None) -> dict:
     return PRESETS.get((level or "").lower(), PRESETS["low"])
 
 
+def effective(level: str | None, overrides: dict | None) -> dict:
+    """Preset bars with the user's manual per-key overrides merged on top."""
+    base = dict(resolve(level))
+    for k, v in (overrides or {}).items():
+        if k in base:
+            base[k] = v
+    return base
+
+
 def read_prefs(path: str, *, default_level: str = "low") -> dict:
-    """{'sensitivity': <level>, 'muted': bool}. Missing/garbage -> safe defaults."""
+    """{'sensitivity', 'muted', 'overrides', 'disabled'}. Missing/garbage -> safe defaults."""
     try:
         with open(path) as f:
             d = json.load(f)
     except Exception:  # noqa: BLE001
         d = {}
     lvl = str(d.get("sensitivity", default_level)).lower()
+    ov = {}
+    for k, v in (d.get("overrides") or {}).items():
+        if k in PRESETS["low"] and isinstance(v, (int, float)):
+            ov[k] = float(v)
+    dis = [s for s in (d.get("disabled") or []) if isinstance(s, str)]
     return {"sensitivity": lvl if lvl in PRESETS else default_level,
-            "muted": bool(d.get("muted", False))}
+            "muted": bool(d.get("muted", False)), "overrides": ov, "disabled": dis}
 
 
 def write_prefs(path: str, **changes) -> dict:
@@ -56,12 +96,22 @@ def write_prefs(path: str, **changes) -> dict:
     return d
 
 
-def describe(level: str, muted: bool) -> str:
-    p = resolve(level)
+def describe(level: str, muted: bool, overrides: dict | None = None,
+             disabled: list | None = None) -> str:
+    p = effective(level, overrides)
+    overrides, disabled = overrides or {}, disabled or []
     bar = {"low": "🟢 quiet", "normal": "🟡 balanced", "high": "🔴 chatty"}.get(level, level)
     mute = "  ·  🔇 *MUTED* (no proactive alerts)" if muted else ""
-    return (f"🎚 *Sensitivity:* {bar} (`{level}`){mute}\n"
-            f"   fires when: RSI ≥{p['rsi_ob']:g}/≤{p['rsi_os']:g} · vol z≥{p['vol_z']:g} · "
-            f"|imbalance|≥{p['imb']:g} · |funding|≥{p['fund']:g}% · OI≥{p['oi']:g}%\n"
-            f"   cooldown {p['cooldown'] // 60}m · re-arms after {p['rearm'] // 60}m clear\n"
-            f"   change: `/sensitivity low|normal|high`  ·  `/mute` · `/unmute`")
+    star = lambda k: "*" if k in overrides else ""   # mark a manually-set bar
+    out = [f"🎚 *Sensitivity:* {bar} (`{level}`){mute}",
+           (f"   fires when: RSI ≥{p['rsi_ob']:g}{star('rsi_ob')}/≤{p['rsi_os']:g}{star('rsi_os')} · "
+            f"vol z≥{p['vol_z']:g}{star('vol_z')} · |imbalance|≥{p['imb']:g}{star('imb')} · "
+            f"|funding|≥{p['fund']:g}{star('fund')}% · OI≥{p['oi']:g}{star('oi')}%"),
+           f"   cooldown {int(p['cooldown']) // 60}m · re-arms after {int(p['rearm']) // 60}m clear"]
+    if disabled:
+        out.append("   🚫 *off:* " + ", ".join(disabled))
+    if overrides:
+        out.append("   ✋ *manual* (★): " + ", ".join(f"{k}={v:g}" for k, v in overrides.items()))
+    out.append("   `/sensitivity low|normal|high` · `set <key> <val>` · `off <signal>` · "
+               "`on <signal>` · `reset` · `/mute`")
+    return "\n".join(out)

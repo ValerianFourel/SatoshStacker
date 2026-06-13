@@ -208,23 +208,16 @@ class TelegramListener:
             from .onchain import onchain_text
             return onchain_text((snap or {}).get("onchain") or {})
         if low.split(" ", 1)[0] in ("/sensitivity", "/sens"):
-            from .sensitivity import describe, PRESETS
-            arg = low.split(" ", 1)[1].strip() if " " in low else ""
-            if arg and arg not in PRESETS:
-                return ("usage: `/sensitivity low|normal|high`  (low = fewest alerts)\n\n"
-                        + describe(*self._prefs()))
-            if arg:
-                lvl, muted = self._set_prefs(sensitivity=arg)
-                return "✅ updated — applies within ~15s\n" + describe(lvl, muted)
-            return describe(*self._prefs())
+            return self._sensitivity_cmd(text)
         if low in ("/mute", "/silence"):
-            self._set_prefs(muted=True)
+            self._update_prefs(muted=True)
             return ("🔇 *Muted* — no proactive alerts. Your Q&A and the daily digest still "
                     "work. `/unmute` to resume.")
         if low == "/unmute":
-            lvl, muted = self._set_prefs(muted=False)
             from .sensitivity import describe
-            return "🔔 *Unmuted.*\n" + describe(lvl, muted)
+            p = self._update_prefs(muted=False)
+            return "🔔 *Unmuted.*\n" + describe(p["sensitivity"], p["muted"],
+                                                p["overrides"], p["disabled"])
         if low == "/news":
             from .websearch import news_line
             return news_line(self.news_fn()) if self.news_fn else "news disabled"
@@ -305,20 +298,57 @@ class TelegramListener:
                 sent += 1
         return sent
 
-    def _prefs(self):
+    def _prefs_full(self):
         from .sensitivity import read_prefs
-        p = read_prefs(self.cfg.prefs_path, default_level=self.cfg.sensitivity)
-        return p["sensitivity"], p["muted"]
+        return read_prefs(self.cfg.prefs_path, default_level=self.cfg.sensitivity)
 
-    def _set_prefs(self, **changes):
-        """Read current prefs (cfg default for a fresh file), apply changes, write both
-        fields so neither clobbers the other. The monitor picks it up next scan."""
+    def _update_prefs(self, **changes):
+        """Read current prefs, apply changes, write ALL fields so none clobbers another.
+        The monitor picks the file up on its next scan (~15s)."""
         from .sensitivity import write_prefs
-        lvl, muted = self._prefs()
-        cur = {"sensitivity": lvl, "muted": muted}
+        cur = self._prefs_full()
         cur.update(changes)
-        p = write_prefs(self.cfg.prefs_path, sensitivity=cur["sensitivity"], muted=cur["muted"])
-        return p["sensitivity"], p["muted"]
+        return write_prefs(self.cfg.prefs_path, sensitivity=cur["sensitivity"], muted=cur["muted"],
+                           overrides=cur["overrides"], disabled=cur["disabled"])
+
+    def _sensitivity_cmd(self, text: str) -> str:
+        from .sensitivity import PRESETS, KEY_ALIAS, SIGNAL_ALIAS, MIN_KEYS, describe
+        args = text.split()[1:]
+        fmt = lambda p: describe(p["sensitivity"], p["muted"], p["overrides"], p["disabled"])
+        ok = lambda p: "✅ updated — applies within ~15s\n" + fmt(p)
+        if not args:
+            return fmt(self._prefs_full())
+        sub = args[0].lower()
+        if sub in PRESETS:                                    # low | normal | high
+            return ok(self._update_prefs(sensitivity=sub))
+        if sub == "reset":
+            return "✅ manual overrides cleared.\n" + fmt(
+                self._update_prefs(overrides={}, disabled=[]))
+        if sub == "set" and len(args) >= 3:
+            key = KEY_ALIAS.get(args[1].lower())
+            if not key:
+                return ("unknown bar `%s`. keys: imbalance funding vol ret rsi_top rsi_bottom "
+                        "oi near cooldown rearm" % args[1])
+            try:
+                val = float(args[2])
+            except ValueError:
+                return "value must be a number, e.g. `/sensitivity set imbalance 0.95`"
+            stored = val * 60 if key in MIN_KEYS else val     # cooldown/rearm given in minutes
+            cur = self._prefs_full()
+            return ok(self._update_prefs(overrides={**cur["overrides"], key: stored}))
+        if sub in ("off", "on") and len(args) >= 2:
+            sig = SIGNAL_ALIAS.get(args[1].lower())
+            if not sig:
+                return ("unknown signal `%s`. signals: imbalance funding oi long_short volume "
+                        "peak bottom spike_up spike_down" % args[1])
+            dis = set(self._prefs_full()["disabled"])
+            dis.add(sig) if sub == "off" else dis.discard(sig)
+            return ok(self._update_prefs(disabled=sorted(dis)))
+        return ("*Manual sensitivity:*\n"
+                "`/sensitivity low|normal|high` — pick a preset\n"
+                "`/sensitivity set <key> <value>` — e.g. `set imbalance 0.95` (raises the bar)\n"
+                "`/sensitivity off <signal>` — e.g. `off imbalance` (silence one signal) · `on <signal>`\n"
+                "`/sensitivity reset` — clear all manual changes\n\n" + fmt(self._prefs_full()))
 
     def _add_alert(self, spec: str, snap) -> str:
         from .alerts import SUPPORTED, parse_rule, resolve_metric

@@ -581,11 +581,13 @@ def test_levels_sell_anchored():
 def test_sensitivity_prefs_and_listener_commands(tmp_path):
     from agent.sensitivity import read_prefs, write_prefs
     p = str(tmp_path / "prefs.json")
-    assert read_prefs(p, default_level="normal") == {"sensitivity": "normal", "muted": False}
+    assert read_prefs(p, default_level="normal") == {
+        "sensitivity": "normal", "muted": False, "overrides": {}, "disabled": []}
     write_prefs(p, sensitivity="high")
     assert read_prefs(p)["sensitivity"] == "high"
     write_prefs(p, muted=True)
-    assert read_prefs(p) == {"sensitivity": "high", "muted": True}    # mute doesn't clobber level
+    d = read_prefs(p)
+    assert d["sensitivity"] == "high" and d["muted"] is True          # mute doesn't clobber level
     # listener commands drive the same file
     lis = TelegramListener(WatchConfig(prefs_path=p), token="t", chat_id="42",
                            analyst=MockAnalyst(), notifier=FakeNotifier(), snapshot_fn=lambda: {})
@@ -594,8 +596,34 @@ def test_sensitivity_prefs_and_listener_commands(tmp_path):
     assert read_prefs(p)["muted"] is True
     lis.handle_text("/unmute")
     assert read_prefs(p)["muted"] is False
-    assert "usage" in lis.handle_text("/sensitivity wat").lower()     # bad value -> usage
+    assert "Manual sensitivity" in lis.handle_text("/sensitivity wat")  # bad token -> help
     assert read_prefs(p)["sensitivity"] == "low"                      # ...and no change
+
+
+def test_manual_overrides_and_disable_signal(tmp_path):
+    from agent.sensitivity import read_prefs
+    p = str(tmp_path / "prefs.json")
+    lis = TelegramListener(WatchConfig(prefs_path=p), token="t", chat_id="42",
+                           analyst=MockAnalyst(), notifier=FakeNotifier(), snapshot_fn=lambda: {})
+    lis.handle_text("/sensitivity set imbalance 0.95")               # raise one bar manually
+    assert read_prefs(p)["overrides"]["imb"] == 0.95
+    lis.handle_text("/sensitivity off imbalance")                   # silence book_imbalance entirely
+    assert "book_imbalance" in read_prefs(p)["disabled"]
+    lis.handle_text("/sensitivity set cooldown 90")                 # minutes -> seconds
+    assert read_prefs(p)["overrides"]["cooldown"] == 5400
+    # the detector honours both: bar raised AND the signal disabled
+    pr = read_prefs(p)
+    det = AnomalyDetector(WatchConfig(), level="high",
+                          overrides=pr["overrides"], disabled=tuple(pr["disabled"]))
+    assert det._thr()["imb"] == 0.95 and det._thr()["cooldown"] == 5400
+    m = make_metrics()
+    m["order_book"] = {"ok": True, "bands": {"1.0": {"imbalance": 0.99}}}  # over the bar...
+    assert "book_imbalance" not in [s.name for s in det.evaluate(m, now_ts=0.0)]  # ...but off
+    # re-enable + reset clears everything
+    lis.handle_text("/sensitivity on imbalance")
+    assert "book_imbalance" not in read_prefs(p)["disabled"]
+    lis.handle_text("/sensitivity reset")
+    assert read_prefs(p)["overrides"] == {} and read_prefs(p)["disabled"] == []
 
 
 def test_monitor_refreshes_prefs_live(tmp_path):
