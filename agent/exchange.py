@@ -96,6 +96,58 @@ def public_order_book(symbol: str, limit: int = 100,
     raise RuntimeError(f"could not fetch public order book for {symbol}")
 
 
+def public_ticker_24h(symbol: str, *, timeout: float = 8.0) -> dict:
+    """Binance OFFICIAL rolling-24h stats (no key) — the authoritative, time-correct
+    24h high/low/change/volume (don't approximate these from candle windows)."""
+    bs = binance_symbol(symbol)
+    for sym in (bs, bs.replace("USDC", "USDT")):
+        try:
+            r = requests.get("https://api.binance.com/api/v3/ticker/24hr",
+                             params={"symbol": sym}, timeout=timeout)
+            r.raise_for_status()
+            d = r.json()
+            return {"last": float(d["lastPrice"]), "high": float(d["highPrice"]),
+                    "low": float(d["lowPrice"]), "change_pct": float(d["priceChangePercent"]),
+                    "volume": float(d["volume"]), "quote_volume": float(d["quoteVolume"]),
+                    "open_ms": int(d["openTime"]), "close_ms": int(d["closeTime"])}
+        except Exception:  # noqa: BLE001
+            continue
+    raise RuntimeError(f"could not fetch 24h ticker for {symbol}")
+
+
+def public_funding_oi(symbol: str, *, timeout: float = 8.0) -> dict:
+    """Binance USDT-perp funding rate + open interest (no key), with 24h OI change.
+    Fail-safe: any field that can't be fetched (e.g. futures geo-blocked) stays None."""
+    fsym = symbol.split("/")[0] + "USDT"
+    out: dict = {"funding_rate": None, "mark": None, "open_interest": None,
+                 "oi_change_24h_pct": None, "next_funding_ms": None}
+    try:
+        p = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex",
+                         params={"symbol": fsym}, timeout=timeout).json()
+        out["funding_rate"] = float(p["lastFundingRate"])
+        out["mark"] = float(p["markPrice"])
+        out["next_funding_ms"] = int(p.get("nextFundingTime", 0))
+    except Exception:  # noqa: BLE001 - funding optional
+        pass
+    try:
+        oi = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
+                          params={"symbol": fsym}, timeout=timeout).json()
+        out["open_interest"] = float(oi["openInterest"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        h = requests.get("https://fapi.binance.com/futures/data/openInterestHist",
+                         params={"symbol": fsym, "period": "1h", "limit": 24},
+                         timeout=timeout).json()
+        if len(h) >= 2 and out["open_interest"]:
+            past = float(h[0]["sumOpenInterest"])
+            if past > 0:
+                out["oi_change_24h_pct"] = round((out["open_interest"] - past) / past * 100, 2)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 class Exchange(abc.ABC):
     """Minimal spot-buy interface the agent depends on."""
 

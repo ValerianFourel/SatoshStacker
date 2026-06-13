@@ -136,6 +136,8 @@ class WatchConfig:
     ret_z_threshold: float = 3.5          # short-window return z-score (price spike)
     near_extreme_pct: float = 0.25        # within this % of 24h high/low = peak/bottom test
     imbalance_threshold: float = 0.60     # |book imbalance| in [-1,1] that's notable
+    funding_extreme_pct: float = 0.05     # |perp funding %/8h| worth flagging (normal ~0.01)
+    oi_spike_pct: float = 8.0             # |open-interest 24h change %| worth flagging
     alert_cooldown_s: int = 1800          # min seconds between alerts of the SAME signal
     analyst_enabled: bool = True          # call the LLM on events (else numeric-only alert)
     analyst_max_tokens: int = 450
@@ -167,6 +169,8 @@ class WatchConfig:
             ret_z_threshold=_f("WATCH_RET_Z", 3.5),
             near_extreme_pct=_f("WATCH_NEAR_EXTREME_PCT", 0.25),
             imbalance_threshold=_f("WATCH_IMBALANCE_THRESHOLD", 0.60),
+            funding_extreme_pct=_f("WATCH_FUNDING_EXTREME_PCT", 0.05),
+            oi_spike_pct=_f("WATCH_OI_SPIKE_PCT", 8.0),
             alert_cooldown_s=_i("WATCH_ALERT_COOLDOWN_S", 1800),
             analyst_enabled=_b("WATCH_ANALYST_ENABLED", True),
             poll_telegram=_b("WATCH_POLL_TELEGRAM", True),

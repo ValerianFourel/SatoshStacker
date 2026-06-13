@@ -47,8 +47,8 @@ def _as_date(x) -> datetime.date | None:
 
 
 def fetch_news(max_items: int = 6) -> dict:
-    """BTC headlines (Yahoo RSS) + Fear&Greed. No key. Fail-safe to partial/empty."""
-    out: dict = {"headlines": [], "fear_greed": None}
+    """BTC headlines (Yahoo RSS) + Fear&Greed with day/week/month sentiment. No key."""
+    out: dict = {"headlines": [], "fear_greed": None, "sentiment": None}
     try:
         r = requests.get("https://feeds.finance.yahoo.com/rss/2.0/headline",
                          params={"s": "BTC-USD", "region": "US", "lang": "en-US"},
@@ -59,21 +59,32 @@ def fetch_news(max_items: int = 6) -> dict:
                             if it.findtext("title")]
     except Exception:  # noqa: BLE001 - news is advisory only
         pass
-    try:
-        d = requests.get("https://api.alternative.me/fng/", params={"limit": 1},
-                         timeout=8).json()["data"][0]
-        out["fear_greed"] = {"value": int(d["value"]), "label": d["value_classification"]}
+    try:  # 30 days of Fear&Greed -> today / 7-day / 30-day sentiment
+        d = requests.get("https://api.alternative.me/fng/", params={"limit": 30},
+                         timeout=8).json()["data"]
+        vals = [int(x["value"]) for x in d]            # d[0] = today, descending
+        out["fear_greed"] = {"value": vals[0], "label": d[0]["value_classification"]}
+        out["sentiment"] = {
+            "day": vals[0],
+            "week_avg": round(sum(vals[:7]) / min(7, len(vals))),
+            "month_avg": round(sum(vals[:30]) / len(vals)),
+        }
     except Exception:  # noqa: BLE001
         pass
     return out
 
 
 def news_line(news: dict) -> str:
-    """One-line human rendering of fetch_news output (for /news + fallbacks)."""
+    """Human rendering of fetch_news output (for /news + fallbacks)."""
     if not news:
         return "no news"
-    fg = news.get("fear_greed")
-    head = f"Fear&Greed: {fg['value']} ({fg['label']})\n" if fg else ""
+    fg, s = news.get("fear_greed"), news.get("sentiment")
+    head = ""
+    if fg:
+        head = f"😨 *Fear & Greed:* {fg['value']} ({fg['label']})"
+        if s:
+            head += f"\n   day {s['day']} · week {s['week_avg']} · month {s['month_avg']}"
+        head += "\n\n📰 *Headlines:*\n"
     hs = news.get("headlines") or []
     body = "\n".join(f"• {h}" for h in hs[:6]) if hs else "(no headlines)"
     return head + body

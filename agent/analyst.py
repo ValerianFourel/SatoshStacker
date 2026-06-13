@@ -24,12 +24,17 @@ log = logging.getLogger("satoshistacker.analyst")
 _SYSTEM = (
     "You are a precise BTC market microstructure & technical analyst for one "
     "operator. You receive COMPUTED NUMBERS (price, order-book depth/imbalance, "
-    "volume surge, RSI, EMAs, ATR/volatility, 24h range), plus recent BTC headlines "
-    "and a Fear&Greed reading, and optionally web ``search_results`` you requested "
-    "(each may include the article's full ``content`` — read it, don't just skim titles). "
+    "volume surge, RSI/EMAs, ATR/volatility, accurate 24h & 7d ranges, perp funding "
+    "rate & open interest), plus BTC headlines and day/week/month Fear&Greed, and "
+    "optionally web ``search_results`` you requested (each may include the article's "
+    "full ``content`` — read it, don't just skim titles). "
+    "The data is a POINT-IN-TIME snapshot: a ``time`` block gives the as-of timestamp "
+    "and data age — anchor your read to that moment and flag anything stale. "
+    "ORDER OF PRIORITY: read the PRICE, CANDLES, order book, funding & OI FIRST; treat "
+    "news & sentiment as SECONDARY confirmation/context, not the lead. "
     "Explain in plain, concise language what is happening RIGHT NOW — e.g. likely "
-    "local top/bottom, exhaustion, breakout, volume/volatility spike, thin book — tie "
-    "in the news/sentiment when relevant, and state caveats. "
+    "local top/bottom, exhaustion, breakout, volume/volatility spike, thin book, "
+    "crowded funding — and state caveats. "
     "If you need fresh context (a catalyst behind a move, an ETF/macro/BTC story), set "
     "``search`` to ONE concise query and you will be re-invoked with results; otherwise "
     "set it to \"\". "
@@ -55,13 +60,15 @@ def numeric_summary(m: dict) -> str:
     price = m.get("price", 0)
     rsi = t.get("rsi_14", 50)
     rlabel = "overbought" if rsi >= 70 else "oversold" if rsi <= 30 else "neutral"
+    fut, tm = m.get("futures", {}), m.get("time", {})
     rows = [
+        f"24h range   ${t.get('low_24h', 0):,.0f} – ${t.get('high_24h', 0):,.0f}   "
+        f"({t.get('range_position_pct', 0):.0f}% up)",
+        f"7d range    ${t.get('low_7d', 0):,.0f} – ${t.get('high_7d', 0):,.0f}",
         f"RSI(14)     {rsi:<6}{rlabel}",
         f"Trend       {t.get('ema_trend_pct', 0):+.2f}%  (EMA 9/21)",
-        f"24h range   {t.get('range_position_pct', 0):.0f}%   "
-        f"{t.get('pct_from_high_24h', 0):+.1f}% high / {t.get('pct_from_low_24h', 0):+.1f}% low",
-        f"Move        1m {t.get('ret_1m_pct', 0):+.2f}%  5m {t.get('ret_5m_pct', 0):+.2f}%  "
-        f"1h {t.get('ret_1h_pct', 0):+.2f}%",
+        f"Move        1m {t.get('ret_1m_pct', 0):+.2f}%  1h {t.get('ret_1h_pct', 0):+.2f}%  "
+        f"24h {t.get('change_24h_pct', 0):+.2f}%",
         f"Volume      {v.get('surge_x', 1)}x avg   (z {v.get('z', 0):+.1f})",
         f"Volatility  ATR {t.get('atr_pct', 0):.2f}%  ·  realized {t.get('realized_vol_pct', 0):.3f}%",
     ]
@@ -69,6 +76,12 @@ def numeric_summary(m: dict) -> str:
         band = b.get("bands", {}).get("1.0", {})
         rows.append(f"Book ±1%     bid {band.get('bid', 0)} / ask {band.get('ask', 0)}  "
                     f"(lean {band.get('imbalance', 0):+.2f})")
+    if fut.get("funding_rate_pct") is not None:
+        rows.append(f"Funding     {fut['funding_rate_pct']:+.4f}%/8h  ({fut.get('funding_annualized_pct')}%/yr)")
+    if fut.get("open_interest") is not None:
+        oic = fut.get("oi_change_24h_pct")
+        rows.append(f"Open int.   {fut['open_interest']:,.0f} BTC"
+                    + (f"  ({oic:+.1f}% 24h)" if oic is not None else ""))
     tuned = m.get("tuned", {})
     if tuned.get("top") or tuned.get("bottom"):
         from .signal_tuner import _pretty
@@ -77,11 +90,12 @@ def numeric_summary(m: dict) -> str:
             if s:
                 rows.append(f"{'Top-watch' if side == 'top' else 'Bot-watch':<11} "
                             f"{_pretty(s['name'])} {s['value']} (fires {arrow}{s['threshold']})")
-    hhmm = (m.get("iso", "") or "")[11:16]
-    out = (f"📊 *BTC*  `${price:,.0f}`   _{hhmm}Z_\n"
-           "```\n" + "\n".join(rows) + "\n```")
+    hhmm = (tm.get("scan_iso", "") or m.get("iso", ""))[11:16]
+    out = (f"📊 *BTC*  `${price:,.0f}`   _{t.get('change_24h_pct', 0):+.2f}% 24h_\n"
+           "```\n" + "\n".join(rows) + "\n```"
+           f"_live · as of {hhmm}Z_")
     if m.get("events"):
-        out += "⚠️ *fired:* " + ", ".join(m["events"])
+        out += "\n⚠️ *fired:* " + ", ".join(m["events"])
     return out
 
 

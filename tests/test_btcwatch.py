@@ -179,8 +179,8 @@ def test_web_search_empty_and_format():
     assert "no results" in format_search("btc etf", [])
     out = format_search("btc", [{"title": "ETF inflows", "snippet": "big", "url": "u"}])
     assert "ETF inflows" in out
-    assert "Fear&Greed: 55" in news_line(
-        {"fear_greed": {"value": 55, "label": "Greed"}, "headlines": ["BTC up"]})
+    nl = news_line({"fear_greed": {"value": 55, "label": "Greed"}, "headlines": ["BTC up"]})
+    assert "55" in nl and "Greed" in nl and "BTC up" in nl
 
 
 def test_newscache_ttl(monkeypatch):
@@ -223,7 +223,8 @@ def test_listener_news_and_search_routing():
         notifier=FakeNotifier(), snapshot_fn=lambda: {"price": 1},
         news_fn=lambda: {"fear_greed": {"value": 50, "label": "Neutral"},
                          "headlines": ["BTC flat"]})
-    assert "Fear&Greed: 50" in lis.handle_text("/news")
+    news = lis.handle_text("/news")
+    assert "50" in news and "Neutral" in news
     assert "mock search" in lis.handle_text("/search why is btc up")
 
 
@@ -358,6 +359,42 @@ def test_detector_uses_tuned_signals_over_defaults():
     m2["tuned"] = {"bottom": {"name": "stoch_14", "value": 8.0,
                               "threshold": 20.0, "auc": 0.8}}
     assert "bottom" in [s.name for s in det2.evaluate(m2, now_ts=0.0)]
+
+
+# ── time-accurate 24h + funding/OI ──
+def test_compute_metrics_uses_official_24h_ticker():
+    ticker = {"low": 62_830.0, "high": 64_394.0, "change_pct": -0.10, "last": 63_618.0}
+    m = compute_metrics(price=63_618.0, klines_fast=flat_fast(price=63_618.0),
+                        klines_trend=trend_klines(start=62_000.0, end=64_000.0),
+                        order_book=book(mid=63_618.0), cfg=WatchConfig(),
+                        now_ts=1_700_000_000.0, ticker24=ticker)
+    t = m["technicals"]
+    assert t["low_24h"] == 62_830.0 and t["high_24h"] == 64_394.0   # official, not 8-day
+    assert t["change_24h_pct"] == -0.10
+    assert "time" in m and m["time"]["candle_age_s"] >= 0            # time-aware
+
+
+def test_compute_metrics_adds_funding_and_oi():
+    funding = {"funding_rate": 0.0006, "mark": 63_595.0,
+               "open_interest": 97_867.0, "oi_change_24h_pct": 1.5}
+    m = compute_metrics(price=63_618.0, klines_fast=flat_fast(price=63_618.0),
+                        klines_trend=trend_klines(start=62_000.0, end=64_000.0),
+                        order_book=book(mid=63_618.0), cfg=WatchConfig(),
+                        now_ts=1_700_000_000.0, funding=funding)
+    assert m["futures"]["funding_rate_pct"] == 0.06                 # 0.0006 * 100
+    assert m["futures"]["open_interest"] == 97_867.0
+
+
+def test_detector_funding_and_oi_flags():
+    det = AnomalyDetector(WatchConfig())
+    m = make_metrics()
+    m["futures"] = {"funding_rate_pct": 0.08, "funding_annualized_pct": 87.6,
+                    "oi_change_24h_pct": 1.0}
+    assert "funding_extreme" in [s.name for s in det.evaluate(m, now_ts=0.0)]
+    det2 = AnomalyDetector(WatchConfig())
+    m2 = make_metrics()
+    m2["futures"] = {"oi_change_24h_pct": 12.0}
+    assert "oi_spike" in [s.name for s in det2.evaluate(m2, now_ts=0.0)]
 
 
 def test_first_launch_onboarding_sends_once(tmp_path):

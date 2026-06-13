@@ -129,11 +129,13 @@ def _tuned_values(klines_trend, tuned: dict) -> dict:
 
 def compute_metrics(*, price: float, klines_fast: list[list[float]],
                     klines_trend: list[list[float]], order_book: dict,
-                    cfg: WatchConfig, now_ts: float, tuned: dict | None = None) -> dict:
+                    cfg: WatchConfig, now_ts: float, tuned: dict | None = None,
+                    ticker24: dict | None = None, funding: dict | None = None) -> dict:
     """Build the full metric snapshot. klines rows are
     [open_time_ms, open, high, low, close, volume]. Pure — no network.
-    If ``tuned`` (from signal_tuner) is given, the backtest-chosen top/bottom
-    oscillators' current values are added under ``m['tuned']``."""
+    ``ticker24`` (Binance official 24h stats) gives the accurate, time-correct 24h
+    high/low/change; ``funding`` adds perp funding-rate + open-interest. ``tuned``
+    adds the backtest-chosen top/bottom oscillators' current values."""
     f = np.array(klines_fast, dtype=float) if klines_fast else np.empty((0, 6))
     t = np.array(klines_trend, dtype=float) if klines_trend else np.empty((0, 6))
     fc = f[:, 4] if len(f) else np.array([price])
@@ -154,11 +156,29 @@ def compute_metrics(*, price: float, klines_fast: list[list[float]],
     ret_5m = round(float(price / fc[-5] - 1) * 100, 3) if len(fc) >= 5 else 0.0
     ret_1h = round(float(price / fc[-60] - 1) * 100, 3) if len(fc) >= 60 else 0.0
 
-    high_24h = float(th.max()) if len(th) else price
-    low_24h = float(tl.min()) if len(tl) else price
+    # TIME-ACCURATE ranges: prefer Binance's official rolling-24h ticker; else select
+    # candles by their actual timestamp (NOT the whole 200-bar trend window).
+    now_ms = now_ts * 1000
+
+    def _wlh(hours):
+        if len(t):
+            mask = t[:, 0] >= now_ms - hours * 3600 * 1000
+            if mask.any():
+                return float(t[mask, 3].min()), float(t[mask, 2].max())
+        return (float(tl.min()) if len(tl) else price,
+                float(th.max()) if len(th) else price)
+
+    if ticker24:
+        low_24h, high_24h = ticker24["low"], ticker24["high"]
+        change_24h = ticker24["change_pct"]
+    else:
+        low_24h, high_24h = _wlh(24)
+        change_24h = round((price / tc[-24] - 1) * 100, 2) if len(tc) >= 24 else 0.0
+    low_7d, high_7d = _wlh(168)
     rng = max(high_24h - low_24h, 1e-9)
     rsi = round(_rsi(tc, 14), 1)
     ema_fast, ema_slow = _ema(tc, 9), _ema(tc, 21)
+    last_candle_ms = int(t[-1, 0]) if len(t) else int(now_ms)
 
     m = {
         "ts": now_ts,
@@ -176,23 +196,49 @@ def compute_metrics(*, price: float, klines_fast: list[list[float]],
             "ret_5m_pct": ret_5m,
             "ret_1h_pct": ret_1h,
             "ret_z": ret_z,
+            "change_24h_pct": round(change_24h, 2),
             "high_24h": round(high_24h, 2),
             "low_24h": round(low_24h, 2),
             "pct_from_high_24h": round((price - high_24h) / high_24h * 100, 3),
             "pct_from_low_24h": round((price - low_24h) / low_24h * 100, 3),
             "range_position_pct": round((price - low_24h) / rng * 100, 1),
+            "high_7d": round(high_7d, 2),
+            "low_7d": round(low_7d, 2),
+            "pct_from_high_7d": round((price - high_7d) / high_7d * 100, 2),
         },
         "volume": {
             "last_1m": round(last_vol, 3), "mean_1m": round(vol_mean, 3),
             "z": vol_z, "surge_x": surge_x,
         },
         "order_book": book_metrics(order_book, bands_pct=cfg.depth_bands_pct),
+        "time": {
+            "scan_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+            "last_candle_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime(last_candle_ms / 1000)),
+            "candle_age_s": int(now_ts - last_candle_ms / 1000),
+            "trend_tf": cfg.trend_tf,
+        },
+        "futures": _futures_block(funding),
     }
     if tuned:
         tv = _tuned_values(klines_trend, tuned)
         if tv:
             m["tuned"] = tv
     return m
+
+
+def _futures_block(funding: dict | None) -> dict:
+    """Perp funding rate (per 8h + annualized) + open interest, from public_funding_oi."""
+    if not funding:
+        return {}
+    fr = funding.get("funding_rate")
+    return {
+        "funding_rate_pct": round(fr * 100, 4) if fr is not None else None,
+        "funding_annualized_pct": round(fr * 100 * 3 * 365, 1) if fr is not None else None,
+        "open_interest": funding.get("open_interest"),
+        "oi_change_24h_pct": funding.get("oi_change_24h_pct"),
+        "mark": funding.get("mark"),
+    }
 
 
 # ───────────────────────── anomaly detection (stateful) ──────────────────────
@@ -262,6 +308,17 @@ class AnomalyDetector:
                 side = "bid-heavy (support)" if imb > 0 else "ask-heavy (resistance)"
                 out.append(Signal("book_imbalance", "microstructure",
                     f"order book {side}, imbalance {imb:+.2f}"))
+        fut = m.get("futures", {})
+        fr = fut.get("funding_rate_pct")
+        if fr is not None and abs(fr) >= c.funding_extreme_pct:
+            who = "crowded longs paying" if fr > 0 else "crowded shorts paying"
+            out.append(Signal("funding_extreme", "spike",
+                f"funding {fr:+.4f}%/8h ({fut.get('funding_annualized_pct')}%/yr) — {who}"))
+        oic = fut.get("oi_change_24h_pct")
+        if oic is not None and abs(oic) >= c.oi_spike_pct:
+            d = ("leverage building" if oic > 0 else "deleveraging / liquidations")
+            out.append(Signal("oi_spike", "spike",
+                f"open interest {oic:+.1f}% in 24h — {d}"))
         return out
 
     def evaluate(self, m: dict, *, now_ts: float) -> list[Signal]:
@@ -309,7 +366,8 @@ class MarketMonitor:
 
     def __init__(self, cfg: WatchConfig, *, notifier, analyst=None,
                  price_fn: Callable | None = None, klines_fn: Callable | None = None,
-                 book_fn: Callable | None = None,
+                 book_fn: Callable | None = None, ticker_fn: Callable | None = None,
+                 funding_fn: Callable | None = None,
                  clock: Callable[[], float] = time.time) -> None:
         from . import exchange  # lazy: keeps tests import-light
         self.cfg = cfg
@@ -321,6 +379,8 @@ class MarketMonitor:
             lambda tf, lim: exchange.public_klines(cfg.symbol, tf, lim))
         self.book_fn = book_fn or (
             lambda: exchange.public_order_book(cfg.symbol, cfg.book_limit))
+        self.ticker_fn = ticker_fn or (lambda: exchange.public_ticker_24h(cfg.symbol))
+        self.funding_fn = funding_fn or (lambda: exchange.public_funding_oi(cfg.symbol))
         self.detector = AnomalyDetector(cfg)
         self._load_state()
 
@@ -351,10 +411,19 @@ class MarketMonitor:
         fast = self.klines_fn(self.cfg.kline_tf, self.cfg.kline_limit)
         trend = self.klines_fn(self.cfg.trend_tf, self.cfg.trend_limit)
         book = self.book_fn()
+        try:
+            ticker24 = self.ticker_fn()
+        except Exception:  # noqa: BLE001 - accurate-but-optional; fall back to candles
+            ticker24 = None
+        try:
+            funding = self.funding_fn()
+        except Exception:  # noqa: BLE001 - futures may be geo-blocked; flags just skip
+            funding = None
         from .signal_tuner import load_tuned
         tuned = load_tuned(self.cfg.tuned_signals_path)
         m = compute_metrics(price=price, klines_fast=fast, klines_trend=trend,
-                            order_book=book, cfg=self.cfg, now_ts=now, tuned=tuned)
+                            order_book=book, cfg=self.cfg, now_ts=now, tuned=tuned,
+                            ticker24=ticker24, funding=funding)
         fired = self.detector.evaluate(m, now_ts=now)
         m["events"] = [s.name for s in fired]
         _atomic_write_json(self.cfg.snapshot_path, m)
