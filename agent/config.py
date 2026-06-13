@@ -101,7 +101,7 @@ class AnalysisConfig:
     enabled: bool = True
     base_url: str = field(default_factory=lambda: os.getenv(
         "LLM_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"))
-    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "qwen3.6-plus"))
+    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "qwen/qwen3.7-plus"))
     api_key_env: str = "LLM_API_KEY"
     cadence_hours: int = 4
     request_timeout_s: int = 30

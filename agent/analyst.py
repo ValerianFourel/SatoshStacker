@@ -38,15 +38,18 @@ _SYSTEM = (
     "& sentiment as SECONDARY context, not the lead. Say which timeframe a reading is on. "
     "Explain plainly what is happening RIGHT NOW (likely top/bottom, exhaustion, breakout, "
     "volume/volatility spike, thin book, crowded funding) with caveats. "
-    "Set `plot` to up to 3 indicator names FROM `available_indicators` that best illustrate "
-    "the current situation to chart (e.g. the one that's flashing + context); [] = use default. "
+    "Use `plot` to chart whatever is most telling: it can be a FLAT list of indicator names "
+    "(one image) OR a list of GROUPS like [[...],[...]] for a PATCHWORK of several images — "
+    "orchestrate it yourself: put related metrics together, split across images when there are "
+    "many, choose any of `available_indicators` (each image = price + its panels). [] = default. "
     "If you need fresh context set `search` to ONE concise query (else \"\"); for a time "
     "window set `search_after`/`search_before` as YYYY-MM-DD (resolve relative phrases via "
     "`today`). HARD RULE: read-only — NO buy/sell/hold advice, targets, or sizing; describe, "
     "don't direct. You MAY save notes to scratch files. Respond with STRICT JSON only:\n"
-    '{"reply":"<=140 words","plot":["<=3 names from available_indicators"],'
+    '{"reply":"<=140 words","plot":[["rsi_14","macd_hist"],["obv_slope_14","vwap_dist_20"]],'
     '"search":"<query or empty>","search_after":"<YYYY-MM-DD or empty>",'
     '"search_before":"<YYYY-MM-DD or empty>","files":[{"name":"notes.md","content":"..."}]}'
+    " (plot may instead be a flat list of names for one image)."
 )
 
 
@@ -173,11 +176,21 @@ class LLMAnalyst:
         self.last_plot: list = []     # indicators the LLM chose to chart on the last call
 
     @staticmethod
-    def _valid_plot(names) -> list:
+    def _valid_plot_spec(plot) -> list:
+        """Normalize the LLM's `plot` into image-GROUPS (list[list[name]]). Accepts a
+        flat list of names (ONE image) or a list of groups (a PATCHWORK of images).
+        Caps at 4 images x 5 panels; drops unknown names."""
         from .signal_tuner import PERIODS
-        if not isinstance(names, list):
+        if not isinstance(plot, list) or not plot:
             return []
-        return [str(n) for n in names if str(n) in PERIODS][:3]
+        groups = ([plot] if all(isinstance(x, str) for x in plot)
+                  else [g for g in plot if isinstance(g, list)])
+        out = []
+        for g in groups[:4]:
+            names = [str(n) for n in g if str(n) in PERIODS][:5]
+            if names:
+                out.append(names)
+        return out
 
     def _llm(self, payload: dict) -> dict | None:
         """One raw LLM call -> parsed JSON dict (or {'reply': prose}); None on error."""
@@ -235,7 +248,7 @@ class LLMAnalyst:
             if d2 is not None:
                 d = d2
                 d["_searched"] = tag
-        self.last_plot = self._valid_plot(d.get("plot"))   # LLM's chart-indicator picks
+        self.last_plot = self._valid_plot_spec(d.get("plot"))   # LLM's patchwork plot spec
         reply = str(d.get("reply", "")).strip() or fallback
         if d.get("_searched"):
             reply += f"\n🔎 searched: {d['_searched']}"

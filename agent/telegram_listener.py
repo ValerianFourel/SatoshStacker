@@ -113,9 +113,8 @@ class TelegramListener:
                 return "no snapshot yet — monitor is warming up"
             return self.analyst.answer("Give a concise read of BTC right now.", snap)
         if low in ("/chart", "/plot"):
-            png, cap = self._build_chart(snap)
-            self.notifier.send_photo(png, cap)
-            return ""        # photo already sent; no extra text
+            self._send_charts(snap)
+            return ""        # photo(s) already sent; no extra text
         if low == "/news":
             from .websearch import news_line
             return news_line(self.news_fn()) if self.news_fn else "news disabled"
@@ -136,10 +135,9 @@ class TelegramListener:
             return _HELP
         if not snap:
             return "no snapshot yet — monitor is warming up"
-        # natural-language chart request -> send a plot (LLM picks indicators for the ask)
+        # natural-language chart request -> send the LLM-orchestrated patchwork
         if "show me" in low or any(w in low for w in ("chart", "plot", "graph", "draw")):
-            png, cap = self._build_chart(snap, question=text)
-            self.notifier.send_photo(png, cap)
+            self._send_charts(snap, question=text)
             return ""
         # conversational answer, with 24h short-term memory for follow-ups
         reply = self.analyst.answer(text, snap, history=self.convo.recent())
@@ -147,17 +145,25 @@ class TelegramListener:
         self.convo.add("assistant", reply)
         return reply
 
-    def _build_chart(self, snap, question=None):
+    def _send_charts(self, snap, question=None) -> int:
+        """Render the LLM's patchwork (1+ images, each price + chosen panels) and send
+        each as a photo. Returns the number sent. Falls back to one default image."""
         from .plotter import build_btc_chart
         from .signal_tuner import load_tuned
-        picks = []
+        groups = []
         if snap:
-            try:                              # let the LLM choose which indicators to chart
-                picks = self.analyst.pick_indicators(snap, question=question)
+            try:                              # the LLM orchestrates the layout (image groups)
+                groups = self.analyst.pick_indicators(snap, question=question)
             except Exception:  # noqa: BLE001 - fall back to backtest-leading
-                picks = []
-        return build_btc_chart(self.cfg, load_tuned(self.cfg.tuned_signals_path),
-                               snapshot=snap or None, indicators=picks or None)
+                groups = []
+        tuned = load_tuned(self.cfg.tuned_signals_path)
+        sent = 0
+        for g in (groups or [None]):          # [None] -> one default (backtest-leading) image
+            png, cap = build_btc_chart(self.cfg, tuned, snapshot=snap or None, indicators=g)
+            if png:
+                self.notifier.send_photo(png, cap)
+                sent += 1
+        return sent
 
     # ── network ──
     def _process_update(self, update: dict) -> None:

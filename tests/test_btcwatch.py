@@ -212,7 +212,8 @@ def test_natural_language_chart_request(monkeypatch):
     note = FakeNotifier()
     lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
                            notifier=note, snapshot_fn=lambda: {"price": 1})
-    monkeypatch.setattr(lis, "_build_chart", lambda snap, question=None: (b"PNG", "cap"))
+    import agent.plotter as pl
+    monkeypatch.setattr(pl, "build_btc_chart", lambda *a, **k: (b"PNG", "cap"))
     assert lis.handle_text("show me a chart of rsi") == ""     # photo, no text
     assert note.photos
 
@@ -495,7 +496,15 @@ def test_analyst_picks_indicators_via_llm():
     from agent.config import AnalysisConfig
     a = LLMAnalyst(AnalysisConfig(), api_key="x")
     a._llm = lambda p: {"reply": "", "plot": ["rsi_14", "macd_hist", "not_real"]}
-    assert a.pick_indicators({"price": 1}) == ["rsi_14", "macd_hist"]   # invalid dropped
+    assert a.pick_indicators({"price": 1}) == [["rsi_14", "macd_hist"]]  # flat -> one image
+
+
+def test_plot_spec_supports_patchwork():
+    from agent.analyst import LLMAnalyst
+    from agent.config import AnalysisConfig
+    a = LLMAnalyst(AnalysisConfig(), api_key="x")
+    a._llm = lambda p: {"reply": "", "plot": [["rsi_14", "macd_hist"], ["obv_slope_14", "x"], []]}
+    assert a.pick_indicators({"price": 1}) == [["rsi_14", "macd_hist"], ["obv_slope_14"]]
 
 
 def test_build_chart_uses_llm_picked_indicators():
@@ -517,10 +526,11 @@ def test_features_are_timeframe_labelled():
 
 
 def test_listener_chart_command_sends_photo(monkeypatch):
+    import agent.plotter as pl
+    monkeypatch.setattr(pl, "build_btc_chart", lambda *a, **k: (b"\x89PNG-data", "chart"))
     note = FakeNotifier()
     lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
                            notifier=note, snapshot_fn=lambda: {"price": 1})
-    monkeypatch.setattr(lis, "_build_chart", lambda snap: (b"\x89PNG-data", "📈 chart"))
     assert lis.handle_text("/chart") == ""        # photo sent, no text reply
     assert note.photos and note.photos[0][0] == b"\x89PNG-data"
 

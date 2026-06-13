@@ -522,11 +522,12 @@ class MarketMonitor:
         try:
             from .plotter import build_btc_chart
             from .signal_tuner import load_tuned
-            picks = getattr(self.analyst, "last_plot", None)  # chosen during event_read
-            png, cap = build_btc_chart(self.cfg, load_tuned(self.cfg.tuned_signals_path),
-                                       snapshot=m, indicators=picks or None)
-            if png:
-                self.notifier.send_photo(png, cap)
+            groups = getattr(self.analyst, "last_plot", None) or [None]  # LLM's patchwork
+            tuned = load_tuned(self.cfg.tuned_signals_path)
+            for g in groups:
+                png, cap = build_btc_chart(self.cfg, tuned, snapshot=m, indicators=g)
+                if png:
+                    self.notifier.send_photo(png, cap)
         except Exception as e:  # noqa: BLE001 - a chart must never break the alert
             log.warning("alert chart failed: %s", e)
 
