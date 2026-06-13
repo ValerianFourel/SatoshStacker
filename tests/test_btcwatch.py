@@ -188,6 +188,15 @@ def test_notifier_broadcasts_to_each_chat(monkeypatch):
     assert posts == ["11", "22", "33"]             # broadcast to all three
 
 
+def test_listener_poll_startup_does_not_crash():
+    import threading
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: {})
+    stop = threading.Event()
+    stop.set()                                     # stop immediately
+    lis.poll(stop)                                 # must run the startup log line + exit cleanly
+
+
 def test_conversation_memory_ttl_and_cap(tmp_path):
     from agent.convo import Conversation
     t = {"now": 1000.0}

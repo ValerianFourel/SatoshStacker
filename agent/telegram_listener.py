@@ -183,7 +183,8 @@ class TelegramListener:
             return
         import requests  # lazy
         url = f"https://api.telegram.org/bot{self.token}/getUpdates"
-        log.info("telegram listener started (operator chat %s)", self.chat_id)
+        log.info("telegram listener started (allowed chats: %s)",
+                 ", ".join(sorted(self.chat_ids)))
         while not stop.is_set():
             try:
                 r = requests.get(url, params={"offset": self._offset, "timeout": 25},
