@@ -58,6 +58,44 @@ def public_ohlcv(symbol: str, timeframe: str = "4h", limit: int = 200,
     raise RuntimeError(f"could not fetch public ohlcv for {symbol}")
 
 
+def public_klines(symbol: str, timeframe: str = "1m", limit: int = 200,
+                  *, timeout: float = 10.0) -> list[list[float]]:
+    """Recent [open_time_ms, open, high, low, close, volume] candles (no key).
+
+    Like ``public_ohlcv`` but keeps the open-time and base-asset volume, which the
+    market monitor needs for volume-surge and realized-volatility metrics."""
+    bs = binance_symbol(symbol)
+    for sym in (bs, bs.replace("USDC", "USDT")):
+        try:
+            r = requests.get("https://api.binance.com/api/v3/klines",
+                             params={"symbol": sym, "interval": timeframe, "limit": limit},
+                             timeout=timeout)
+            r.raise_for_status()
+            return [[float(k[0]), float(k[1]), float(k[2]), float(k[3]),
+                     float(k[4]), float(k[5])] for k in r.json()]
+        except Exception:  # noqa: BLE001
+            continue
+    raise RuntimeError(f"could not fetch public klines for {symbol}")
+
+
+def public_order_book(symbol: str, limit: int = 100,
+                      *, timeout: float = 8.0) -> dict[str, list[list[float]]]:
+    """L2 order book {"bids":[[price,qty],...], "asks":[...]} from Binance (no key).
+    Bids are descending, asks ascending (Binance order). Falls back USDC->USDT."""
+    bs = binance_symbol(symbol)
+    for sym in (bs, bs.replace("USDC", "USDT")):
+        try:
+            r = requests.get("https://api.binance.com/api/v3/depth",
+                             params={"symbol": sym, "limit": limit}, timeout=timeout)
+            r.raise_for_status()
+            d = r.json()
+            return {"bids": [[float(p), float(q)] for p, q in d.get("bids", [])],
+                    "asks": [[float(p), float(q)] for p, q in d.get("asks", [])]}
+        except Exception:  # noqa: BLE001
+            continue
+    raise RuntimeError(f"could not fetch public order book for {symbol}")
+
+
 class Exchange(abc.ABC):
     """Minimal spot-buy interface the agent depends on."""
 

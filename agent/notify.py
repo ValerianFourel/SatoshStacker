@@ -19,6 +19,8 @@ class Notifier:
         self.chat_id = clean_secret(chat_id or os.getenv("TELEGRAM_CHAT_ID"))
 
     def send(self, text: str) -> None:
+        from .secrets import redact
+        text = redact(text)  # scrub any credential before it reaches a log/stdout/Telegram
         if not (self.token and self.chat_id):
             log.info("[notify] %s", text)
             print(f"[notify] {text}")

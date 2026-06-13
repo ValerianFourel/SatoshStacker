@@ -104,10 +104,15 @@ def _qwen_meta(payload: dict, model: str) -> dict:
         return {"error": type(e).__name__}
 
 
-def run_tune(symbol: str = "BTC/USDT", model: str | None = None) -> dict:
-    """Backtest + (smart-Qwen) pick the leading technicals; write technicals.json.
+def run_tune(symbol: str = "BTC/USDT", model: str | None = None,
+             out_path: str | Path | None = None) -> dict:
+    """Backtest + (smart-Qwen) pick the leading technicals; write a technicals JSON.
+
+    ``out_path`` lets a multi-asset caller write a per-asset file
+    (e.g. ``agent/technicals_SOL.json``); defaults to the BTC trader's file.
     Returns a short summary. Fail-safe: on any error leaves the existing config."""
     model = model or os.getenv("TUNE_MODEL", "qwen/qwen3.5-plus-20260420")
+    out = Path(out_path) if out_path else OUT
     try:
         c4 = np.array(public_ohlcv(symbol, "4h", 400))[:, 3]
         c1 = np.array(public_ohlcv(symbol, "1h", 700))[:, 3]
@@ -134,7 +139,7 @@ def run_tune(symbol: str = "BTC/USDT", model: str | None = None) -> dict:
            "qwen_decision": decision, "context_note": decision.get("context_note", ""),
            "suggested": sug}
     try:
-        OUT.write_text(json.dumps(cfg, indent=2))
+        out.write_text(json.dumps(cfg, indent=2))
     except Exception:  # noqa: BLE001
         pass
     return {"leader": leader, "suggested": sug, "context_note": cfg["context_note"],

@@ -1,0 +1,30 @@
+# systemd unit for the read-only BTC watch (monitor + LLM analyst + Telegram Q&A).
+# SEPARATE from the trading agent: public Binance data only, no keys, no orders.
+# Install: sudo cp deploy/satoshistacker-btcwatch.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now satoshistacker-btcwatch
+[Unit]
+Description=SatoshiStacker BTC watch (read-only monitor + LLM analyst + Telegram Q&A)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=satoshi
+WorkingDirectory=/opt/satoshistacker
+EnvironmentFile=/opt/satoshistacker/.env
+ExecStart=/opt/satoshistacker/.venv/bin/python -m agent.btcwatch
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=satoshistacker-btcwatch
+# light hardening — it only needs to write the snapshot + scratch dir
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/satoshistacker
+
+[Install]
+WantedBy=multi-user.target

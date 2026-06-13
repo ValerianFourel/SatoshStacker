@@ -4,6 +4,13 @@
 *.key
 *.pem
 *.p12
+# exported API-key CSVs are SECRETS — never commit them
+*apiKey*.csv
+*api-key*.csv
+Default Workspace-apiKey-344190.csv
+
+# runtime state (snapshots, detector cooldowns, onboarding marker) — regenerated
+state/
 
 # state / db
 *.db
@@ -20,7 +27,7 @@ venv/
 .mypy_cache/
 
 # large data (re-fetch via backtest/fetch_data.py)
-backtest/data/*.parquet
+backtest/data/
 
 # keep backtest result CSVs out of git noise (regenerate via engine.py)
 backtest/results/*.csv

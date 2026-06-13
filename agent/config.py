@@ -114,6 +114,69 @@ class AnalysisConfig:
 
 
 @dataclass(frozen=True)
+class WatchConfig:
+    """BTC market-watch service (`agent.btcwatch`) — monitor + LLM analyst + Telegram Q&A.
+
+    Completely separate from the trading agent: public Binance data only, NO keys,
+    NO orders. The LLM is read-only analysis; it may write to a sandboxed scratch
+    dir but never to the repo or the exchange.
+    """
+    symbol: str = "BTC/USDT"              # USDT for the deepest public order book
+    scan_interval_s: int = 15             # how often to refresh metrics + check anomalies
+    kline_tf: str = "1m"                  # fast candles for spikes/volume/vol
+    kline_limit: int = 240                # ~4h of 1m candles
+    trend_tf: str = "1h"                  # slower candles for trend/RSI/24h range
+    trend_limit: int = 200
+    book_limit: int = 100                 # order-book depth levels to pull
+    depth_bands_pct: tuple = (0.5, 1.0, 2.0)  # bid/ask depth windows around mid
+    # anomaly thresholds (an event = "out of the norm" -> auto LLM read)
+    rsi_overbought: float = 72.0          # peaking
+    rsi_oversold: float = 28.0            # bottoming
+    vol_z_threshold: float = 3.0          # volume z-score spike (std devs over recent mean)
+    ret_z_threshold: float = 3.5          # short-window return z-score (price spike)
+    near_extreme_pct: float = 0.25        # within this % of 24h high/low = peak/bottom test
+    imbalance_threshold: float = 0.60     # |book imbalance| in [-1,1] that's notable
+    alert_cooldown_s: int = 1800          # min seconds between alerts of the SAME signal
+    analyst_enabled: bool = True          # call the LLM on events (else numeric-only alert)
+    analyst_max_tokens: int = 450
+    poll_telegram: bool = True            # run the inbound Q&A listener
+    news_enabled: bool = True             # attach BTC headlines + Fear&Greed (keyless)
+    news_ttl_s: int = 600                 # cache news this long (don't refetch every scan)
+    web_search_enabled: bool = True       # let the analyst look things up online
+    search_max_results: int = 5           # SEARXNG_URL / TAVILY_API_KEY / SERPER_API_KEY / DuckDuckGo
+    fetch_articles: int = 2               # open & READ the top N results (0 = snippets only)
+    article_max_chars: int = 2500         # cap extracted article text fed to the LLM
+    scratch_dir: str = "scratch"          # sandbox the analyst may write to (temp files)
+    snapshot_path: str = "state/btc_snapshot.json"
+    state_path: str = "state/btc_watch_state.json"  # detector cooldowns survive restarts
+    onboarded_marker: str = "state/btc_watch_onboarded"  # one-time onboarding tip guard
+
+    @staticmethod
+    def from_env() -> "WatchConfig":
+        return WatchConfig(
+            symbol=os.getenv("WATCH_SYMBOL", "BTC/USDT"),
+            scan_interval_s=_i("WATCH_SCAN_INTERVAL_S", 15),
+            kline_tf=os.getenv("WATCH_KLINE_TF", "1m"),
+            trend_tf=os.getenv("WATCH_TREND_TF", "1h"),
+            rsi_overbought=_f("WATCH_RSI_OVERBOUGHT", 72.0),
+            rsi_oversold=_f("WATCH_RSI_OVERSOLD", 28.0),
+            vol_z_threshold=_f("WATCH_VOL_Z", 3.0),
+            ret_z_threshold=_f("WATCH_RET_Z", 3.5),
+            near_extreme_pct=_f("WATCH_NEAR_EXTREME_PCT", 0.25),
+            imbalance_threshold=_f("WATCH_IMBALANCE_THRESHOLD", 0.60),
+            alert_cooldown_s=_i("WATCH_ALERT_COOLDOWN_S", 1800),
+            analyst_enabled=_b("WATCH_ANALYST_ENABLED", True),
+            poll_telegram=_b("WATCH_POLL_TELEGRAM", True),
+            scratch_dir=os.getenv("WATCH_SCRATCH_DIR", "scratch"),
+            news_enabled=_b("WATCH_NEWS_ENABLED", True),
+            news_ttl_s=_i("WATCH_NEWS_TTL_S", 600),
+            web_search_enabled=_b("WATCH_WEB_SEARCH", True),
+            fetch_articles=_i("WATCH_FETCH_ARTICLES", 2),
+            article_max_chars=_i("WATCH_ARTICLE_MAX_CHARS", 2500),
+        )
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     mode: Mode = "dry_run"
     symbol: str = "BTC/USDC"

@@ -224,11 +224,18 @@ def simulate_parallel(bars, *, step_bars, budget, client, model, use_news=True,
         news = fetch_pit_news(t) if use_news else []
         inputs.append((t, price, m, news))
 
-    # phase 2: ALL LLM market-view calls in parallel
+    # phase 2: ALL LLM market-view calls in parallel (with a live progress counter)
+    import threading
+    _done, _lock, _total = {"n": 0}, threading.Lock(), len(inputs)
+
     def call(inp):
         t, price, m, news = inp
         feats = {"price": round(price, 2), **m, "recent_news": news}
-        return llm_target(client, model, feats, t.strftime("%Y-%m-%dT%H:%M:%SZ"), 0.5)
+        r = llm_target(client, model, feats, t.strftime("%Y-%m-%dT%H:%M:%SZ"), 0.5)
+        with _lock:
+            _done["n"] += 1
+            print(f"[sats-progress] {_done['n']}/{_total} LLM calls", file=sys.stderr, flush=True)
+        return r
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         decisions = list(ex.map(call, inputs))

@@ -1,0 +1,168 @@
+{
+  "as_of": "startup/weekly",
+  "backtest_leader": {
+    "indicator": "ema_cross_8_21",
+    "lag": 6,
+    "ic": 0.1374,
+    "direction": "momentum",
+    "abs_ic": 0.1374,
+    "timeframe": "4h"
+  },
+  "ranked": {
+    "4h": [
+      {
+        "indicator": "ema_cross_8_21",
+        "lag": 6,
+        "ic": 0.1374,
+        "direction": "momentum",
+        "abs_ic": 0.1374
+      },
+      {
+        "indicator": "momentum_24",
+        "lag": 6,
+        "ic": 0.1165,
+        "direction": "momentum",
+        "abs_ic": 0.1165
+      },
+      {
+        "indicator": "rsi_21",
+        "lag": 6,
+        "ic": 0.1025,
+        "direction": "momentum",
+        "abs_ic": 0.1025
+      },
+      {
+        "indicator": "momentum_12",
+        "lag": 6,
+        "ic": 0.0939,
+        "direction": "momentum",
+        "abs_ic": 0.0939
+      },
+      {
+        "indicator": "rsi_28",
+        "lag": 6,
+        "ic": 0.0768,
+        "direction": "momentum",
+        "abs_ic": 0.0768
+      },
+      {
+        "indicator": "ema_cross_20_50",
+        "lag": 3,
+        "ic": 0.0473,
+        "direction": "momentum",
+        "abs_ic": 0.0473
+      },
+      {
+        "indicator": "rsi_14",
+        "lag": 6,
+        "ic": 0.0412,
+        "direction": "momentum",
+        "abs_ic": 0.0412
+      },
+      {
+        "indicator": "rsi_7",
+        "lag": 2,
+        "ic": -0.0384,
+        "direction": "reversion",
+        "abs_ic": 0.0384
+      },
+      {
+        "indicator": "momentum_6",
+        "lag": 2,
+        "ic": -0.0283,
+        "direction": "reversion",
+        "abs_ic": 0.0283
+      }
+    ],
+    "1h": [
+      {
+        "indicator": "ema_cross_20_50",
+        "lag": 6,
+        "ic": 0.1232,
+        "direction": "momentum",
+        "abs_ic": 0.1232
+      },
+      {
+        "indicator": "momentum_6",
+        "lag": 2,
+        "ic": -0.0946,
+        "direction": "reversion",
+        "abs_ic": 0.0946
+      },
+      {
+        "indicator": "rsi_28",
+        "lag": 3,
+        "ic": -0.0605,
+        "direction": "reversion",
+        "abs_ic": 0.0605
+      },
+      {
+        "indicator": "rsi_14",
+        "lag": 2,
+        "ic": -0.0603,
+        "direction": "reversion",
+        "abs_ic": 0.0603
+      },
+      {
+        "indicator": "momentum_12",
+        "lag": 3,
+        "ic": -0.0598,
+        "direction": "reversion",
+        "abs_ic": 0.0598
+      },
+      {
+        "indicator": "ema_cross_8_21",
+        "lag": 6,
+        "ic": 0.0582,
+        "direction": "momentum",
+        "abs_ic": 0.0582
+      },
+      {
+        "indicator": "rsi_7",
+        "lag": 2,
+        "ic": -0.0532,
+        "direction": "reversion",
+        "abs_ic": 0.0532
+      },
+      {
+        "indicator": "momentum_24",
+        "lag": 1,
+        "ic": -0.048,
+        "direction": "reversion",
+        "abs_ic": 0.048
+      },
+      {
+        "indicator": "rsi_21",
+        "lag": 6,
+        "ic": -0.0415,
+        "direction": "reversion",
+        "abs_ic": 0.0415
+      }
+    ]
+  },
+  "qwen_decision": {
+    "timeframe": "4h",
+    "primary_indicator": "ema_cross_8_21",
+    "rsi_period": 21,
+    "lag": 6,
+    "regime": "momentum",
+    "confirming": [
+      "momentum_24",
+      "rsi_21"
+    ],
+    "context_note": "Focus on 4h closes. Enter on EMA 8/21 cross aligned with trend. Confirm with RSI(21) above 50 for longs, below 50 for shorts. Target 6-bar hold. Filter out 1h mean-reversion noise; regime is purely momentum-driven.",
+    "rationale": "4h dominates with highest IC (0.1374) and consistent momentum signals. EMA 8/21 cross leads, supported by momentum_24 and rsi_21. 6-bar lag aligns with peak predictive power. 1h shows mixed/reversion signals, confirming 4h as the primary execution horizon."
+  },
+  "context_note": "Focus on 4h closes. Enter on EMA 8/21 cross aligned with trend. Confirm with RSI(21) above 50 for longs, below 50 for shorts. Target 6-bar hold. Filter out 1h mean-reversion noise; regime is purely momentum-driven.",
+  "suggested": {
+    "timeframe": "4h",
+    "primary_indicator": "ema_cross_8_21",
+    "rsi_period": 21,
+    "lag": 6,
+    "regime": "momentum",
+    "confirming": [
+      "momentum_24",
+      "rsi_21"
+    ]
+  }
+}

@@ -1,0 +1,345 @@
+"""BTC market monitor — continuously computes microstructure + technical metrics
+from PUBLIC Binance data, writes an atomic snapshot, and fires an LLM read on
+out-of-the-norm events (peaks / bottoms / volume & volatility spikes).
+
+NO keys, NO orders, NO trading — this process only observes and talks. It is run
+by ``agent.btcwatch`` as a separate service from the accumulation trader.
+
+Design:
+  * ``compute_metrics`` is a PURE function (inject price/klines/book) so the metric
+    math and the detector are unit-testable with zero network.
+  * ``AnomalyDetector`` is stateful but deterministic: per-signal cooldown + a
+    re-arm (hysteresis) flag so one episode = one alert, surviving restarts.
+  * ``MarketMonitor`` does the I/O: fetch -> compute -> snapshot -> detect ->
+    (on fire) analyst read -> Telegram. Analyst + notifier are injected.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import tempfile
+import time
+from dataclasses import dataclass, field
+from typing import Callable
+
+import numpy as np
+
+from .config import WatchConfig
+
+log = logging.getLogger("satoshistacker.monitor")
+
+
+# ───────────────────────── pure metric math (no I/O) ─────────────────────────
+
+def _rsi(closes: np.ndarray, n: int = 14) -> float:
+    if len(closes) < n + 1:
+        return 50.0
+    d = np.diff(closes[-(n + 1):])
+    up, dn = d[d > 0].sum(), -d[d < 0].sum()
+    return 100.0 if dn == 0 else float(100 - 100 / (1 + (up / n) / (dn / n)))
+
+
+def _ema(values: np.ndarray, n: int) -> float:
+    if len(values) == 0:
+        return 0.0
+    if len(values) < n:
+        return float(values.mean())
+    k = 2.0 / (n + 1)
+    e = float(values[0])
+    for v in values[1:]:
+        e = float(v) * k + e * (1 - k)
+    return e
+
+
+def _atr_pct(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
+             n: int = 14) -> float:
+    if len(closes) < 2:
+        return 0.0
+    m = min(len(highs), len(lows), len(closes))
+    h, l, c = highs[-m:], lows[-m:], closes[-m:]
+    prev = c[:-1]
+    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - prev),
+                                              np.abs(l[1:] - prev)))
+    atr = float(tr[-n:].mean()) if len(tr) else 0.0
+    px = float(c[-1]) or 1.0
+    return round(atr / px * 100, 4)
+
+
+def realized_vol_pct(closes: np.ndarray, n: int = 60) -> float:
+    """Stdev of per-candle log returns over the last n candles, in %."""
+    if len(closes) < 3:
+        return 0.0
+    c = closes[-(n + 1):]
+    r = np.diff(np.log(c))
+    return round(float(np.std(r)) * 100, 4)
+
+
+def _zscore(series: np.ndarray, value: float) -> float:
+    if len(series) < 5:
+        return 0.0
+    mu, sd = float(series.mean()), float(series.std())
+    return 0.0 if sd == 0 else round((value - mu) / sd, 2)
+
+
+def book_metrics(order_book: dict, *, bands_pct=(0.5, 1.0, 2.0)) -> dict:
+    bids = order_book.get("bids") or []
+    asks = order_book.get("asks") or []
+    if not bids or not asks:
+        return {"ok": False}
+    best_bid, best_ask = float(bids[0][0]), float(asks[0][0])
+    mid = (best_bid + best_ask) / 2
+    spread_bps = round((best_ask - best_bid) / mid * 1e4, 2) if mid else 0.0
+    out = {"ok": True, "mid": round(mid, 2), "best_bid": best_bid,
+           "best_ask": best_ask, "spread_bps": spread_bps, "bands": {}}
+    for band in bands_pct:
+        lo, hi = mid * (1 - band / 100), mid * (1 + band / 100)
+        bid_vol = sum(float(q) for p, q in bids if float(p) >= lo)
+        ask_vol = sum(float(q) for p, q in asks if float(p) <= hi)
+        tot = bid_vol + ask_vol
+        imb = round((bid_vol - ask_vol) / tot, 3) if tot else 0.0
+        out["bands"][str(band)] = {"bid": round(bid_vol, 3),
+                                   "ask": round(ask_vol, 3), "imbalance": imb}
+    # biggest single resting wall on each side (size, price)
+    tb = max(bids, key=lambda x: float(x[1]))
+    ta = max(asks, key=lambda x: float(x[1]))
+    out["top_bid_wall"] = [float(tb[0]), round(float(tb[1]), 3)]
+    out["top_ask_wall"] = [float(ta[0]), round(float(ta[1]), 3)]
+    return out
+
+
+def compute_metrics(*, price: float, klines_fast: list[list[float]],
+                    klines_trend: list[list[float]], order_book: dict,
+                    cfg: WatchConfig, now_ts: float) -> dict:
+    """Build the full metric snapshot. klines rows are
+    [open_time_ms, open, high, low, close, volume]. Pure — no network."""
+    f = np.array(klines_fast, dtype=float) if klines_fast else np.empty((0, 6))
+    t = np.array(klines_trend, dtype=float) if klines_trend else np.empty((0, 6))
+    fc = f[:, 4] if len(f) else np.array([price])
+    fv = f[:, 5] if len(f) else np.array([0.0])
+    tc = t[:, 4] if len(t) else fc
+    th, tl = (t[:, 2], t[:, 3]) if len(t) else (tc, tc)
+
+    last_vol = float(fv[-1]) if len(fv) else 0.0
+    vol_window = fv[-61:-1] if len(fv) > 5 else fv  # exclude the live (partial) candle
+    vol_z = _zscore(vol_window, last_vol)
+    vol_mean = float(vol_window.mean()) if len(vol_window) else 0.0
+    surge_x = round(last_vol / vol_mean, 2) if vol_mean else 0.0
+
+    # short-window return + its z-score (price spike detection)
+    rets = np.diff(fc) / fc[:-1] * 100 if len(fc) > 1 else np.array([0.0])
+    ret_last = float(rets[-1]) if len(rets) else 0.0
+    ret_z = _zscore(rets[-120:-1] if len(rets) > 5 else rets, ret_last)
+    ret_5m = round(float(price / fc[-5] - 1) * 100, 3) if len(fc) >= 5 else 0.0
+    ret_1h = round(float(price / fc[-60] - 1) * 100, 3) if len(fc) >= 60 else 0.0
+
+    high_24h = float(th.max()) if len(th) else price
+    low_24h = float(tl.min()) if len(tl) else price
+    rng = max(high_24h - low_24h, 1e-9)
+    rsi = round(_rsi(tc, 14), 1)
+    ema_fast, ema_slow = _ema(tc, 9), _ema(tc, 21)
+
+    return {
+        "ts": now_ts,
+        "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+        "symbol": cfg.symbol,
+        "price": round(price, 2),
+        "technicals": {
+            "rsi_14": rsi,
+            "ema_fast_9": round(ema_fast, 2),
+            "ema_slow_21": round(ema_slow, 2),
+            "ema_trend_pct": round((ema_fast / ema_slow - 1) * 100, 3) if ema_slow else 0.0,
+            "atr_pct": _atr_pct(th, tl, tc, 14),
+            "realized_vol_pct": realized_vol_pct(fc, 60),
+            "ret_1m_pct": round(ret_last, 3),
+            "ret_5m_pct": ret_5m,
+            "ret_1h_pct": ret_1h,
+            "ret_z": ret_z,
+            "high_24h": round(high_24h, 2),
+            "low_24h": round(low_24h, 2),
+            "pct_from_high_24h": round((price - high_24h) / high_24h * 100, 3),
+            "pct_from_low_24h": round((price - low_24h) / low_24h * 100, 3),
+            "range_position_pct": round((price - low_24h) / rng * 100, 1),
+        },
+        "volume": {
+            "last_1m": round(last_vol, 3), "mean_1m": round(vol_mean, 3),
+            "z": vol_z, "surge_x": surge_x,
+        },
+        "order_book": book_metrics(order_book, bands_pct=cfg.depth_bands_pct),
+    }
+
+
+# ───────────────────────── anomaly detection (stateful) ──────────────────────
+
+@dataclass
+class Signal:
+    name: str
+    kind: str          # peak | bottom | spike | microstructure
+    detail: str
+
+
+@dataclass
+class AnomalyDetector:
+    cfg: WatchConfig
+    # per-signal state: {"last_fired": ts, "armed": bool}
+    _state: dict = field(default_factory=dict)
+
+    def load_state(self, d: dict) -> None:
+        if isinstance(d, dict):
+            self._state = d
+
+    def dump_state(self) -> dict:
+        return self._state
+
+    def _conditions(self, m: dict) -> list[Signal]:
+        tech, vol, book = m["technicals"], m["volume"], m.get("order_book", {})
+        c = self.cfg
+        out: list[Signal] = []
+        near_high = tech["pct_from_high_24h"] >= -c.near_extreme_pct
+        near_low = tech["pct_from_low_24h"] <= c.near_extreme_pct
+        if near_high and tech["rsi_14"] >= c.rsi_overbought:
+            out.append(Signal("peak", "peak",
+                f"price ${m['price']:,.0f} at 24h-high (RSI {tech['rsi_14']}, "
+                f"{tech['pct_from_high_24h']:+.2f}% from high)"))
+        if near_low and tech["rsi_14"] <= c.rsi_oversold:
+            out.append(Signal("bottom", "bottom",
+                f"price ${m['price']:,.0f} at 24h-low (RSI {tech['rsi_14']}, "
+                f"{tech['pct_from_low_24h']:+.2f}% from low)"))
+        if vol["z"] >= c.vol_z_threshold:
+            out.append(Signal("volume_spike", "spike",
+                f"volume {vol['surge_x']}x normal (z={vol['z']})"))
+        if tech["ret_z"] >= c.ret_z_threshold:
+            out.append(Signal("price_spike_up", "spike",
+                f"fast up-move {tech['ret_1m_pct']:+.2f}%/1m (z={tech['ret_z']})"))
+        if tech["ret_z"] <= -c.ret_z_threshold:
+            out.append(Signal("price_spike_down", "spike",
+                f"fast down-move {tech['ret_1m_pct']:+.2f}%/1m (z={tech['ret_z']})"))
+        if book.get("ok"):
+            band = book["bands"].get(str(c.depth_bands_pct[1]), {})
+            imb = band.get("imbalance", 0.0)
+            if abs(imb) >= c.imbalance_threshold:
+                side = "bid-heavy (support)" if imb > 0 else "ask-heavy (resistance)"
+                out.append(Signal("book_imbalance", "microstructure",
+                    f"order book {side}, imbalance {imb:+.2f}"))
+        return out
+
+    def evaluate(self, m: dict, *, now_ts: float) -> list[Signal]:
+        """Return signals that should fire NOW. A signal fires only if it is armed
+        (was clear since the last fire) AND its cooldown has elapsed; firing disarms
+        it, and it re-arms once the condition clears. One episode = one alert."""
+        active = {s.name: s for s in self._conditions(m)}
+        fired: list[Signal] = []
+        # re-arm any signal whose condition is no longer present
+        for name, st in self._state.items():
+            if name not in active:
+                st["armed"] = True
+        for name, sig in active.items():
+            st = self._state.setdefault(name, {"last_fired": None, "armed": True})
+            lf = st.get("last_fired")
+            cooled = lf is None or (now_ts - lf) >= self.cfg.alert_cooldown_s
+            if st.get("armed", True) and cooled:
+                fired.append(sig)
+                st["last_fired"] = now_ts
+                st["armed"] = False
+        return fired
+
+
+# ─────────────────────────────── the monitor loop ───────────────────────────
+
+def _atomic_write_json(path: str, obj: dict) -> None:
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, separators=(",", ":"))
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+class MarketMonitor:
+    """Fetch -> compute -> snapshot -> detect -> (on event) analyst read -> notify.
+
+    Fetchers/analyst/notifier are injected so the whole pipeline is testable with
+    no network. Each defaults to the real public-Binance helper.
+    """
+
+    def __init__(self, cfg: WatchConfig, *, notifier, analyst=None,
+                 price_fn: Callable | None = None, klines_fn: Callable | None = None,
+                 book_fn: Callable | None = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        from . import exchange  # lazy: keeps tests import-light
+        self.cfg = cfg
+        self.notifier = notifier
+        self.analyst = analyst
+        self.clock = clock
+        self.price_fn = price_fn or (lambda: exchange.public_price(cfg.symbol))
+        self.klines_fn = klines_fn or (
+            lambda tf, lim: exchange.public_klines(cfg.symbol, tf, lim))
+        self.book_fn = book_fn or (
+            lambda: exchange.public_order_book(cfg.symbol, cfg.book_limit))
+        self.detector = AnomalyDetector(cfg)
+        self._load_state()
+
+    def _load_state(self) -> None:
+        try:
+            with open(self.cfg.state_path) as f:
+                self.detector.load_state(json.load(f).get("detector", {}))
+        except Exception:  # noqa: BLE001 - first run / corrupt -> fresh state
+            pass
+
+    def _save_state(self) -> None:
+        try:
+            _atomic_write_json(self.cfg.state_path,
+                               {"detector": self.detector.dump_state()})
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not persist detector state: %s", e)
+
+    def latest_snapshot(self) -> dict | None:
+        try:
+            with open(self.cfg.snapshot_path) as f:
+                return json.load(f)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def run_once(self) -> dict:
+        now = self.clock()
+        price = self.price_fn()
+        fast = self.klines_fn(self.cfg.kline_tf, self.cfg.kline_limit)
+        trend = self.klines_fn(self.cfg.trend_tf, self.cfg.trend_limit)
+        book = self.book_fn()
+        m = compute_metrics(price=price, klines_fast=fast, klines_trend=trend,
+                            order_book=book, cfg=self.cfg, now_ts=now)
+        fired = self.detector.evaluate(m, now_ts=now)
+        m["events"] = [s.name for s in fired]
+        _atomic_write_json(self.cfg.snapshot_path, m)
+        if fired:
+            self._handle_events(m, fired)
+            self._save_state()
+        return m
+
+    def _handle_events(self, m: dict, fired: list[Signal]) -> None:
+        kinds = ", ".join(f"{s.kind.upper()}: {s.detail}" for s in fired)
+        log.info("anomaly fired: %s", kinds)
+        header = "🚨 *BTC anomaly* — " + ", ".join(s.name for s in fired)
+        if self.cfg.analyst_enabled and self.analyst is not None:
+            try:
+                read = self.analyst.event_read(m, fired)
+                self.notifier.send(f"{header}\n{kinds}\n\n🧠 {read}")
+                return
+            except Exception as e:  # noqa: BLE001 - never let analysis break the loop
+                log.warning("analyst event_read failed: %s", e)
+        self.notifier.send(f"{header}\n{kinds}")  # numeric-only fallback
+
+    def run(self, stop) -> None:
+        """Loop until ``stop`` (a threading.Event-like with .is_set/.wait) is set."""
+        log.info("market monitor started: %s every %ss", self.cfg.symbol,
+                 self.cfg.scan_interval_s)
+        while not stop.is_set():
+            try:
+                self.run_once()
+            except Exception as e:  # noqa: BLE001 - transient fetch errors are normal
+                log.warning("monitor cycle error: %s", e)
+            stop.wait(self.cfg.scan_interval_s)

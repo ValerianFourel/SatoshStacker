@@ -1,0 +1,168 @@
+{
+  "as_of": "startup/weekly",
+  "backtest_leader": {
+    "indicator": "ema_cross_8_21",
+    "lag": 6,
+    "ic": 0.1166,
+    "direction": "momentum",
+    "abs_ic": 0.1166,
+    "timeframe": "1h"
+  },
+  "ranked": {
+    "4h": [
+      {
+        "indicator": "rsi_7",
+        "lag": 6,
+        "ic": -0.0783,
+        "direction": "reversion",
+        "abs_ic": 0.0783
+      },
+      {
+        "indicator": "momentum_6",
+        "lag": 6,
+        "ic": -0.0671,
+        "direction": "reversion",
+        "abs_ic": 0.0671
+      },
+      {
+        "indicator": "rsi_14",
+        "lag": 6,
+        "ic": -0.0642,
+        "direction": "reversion",
+        "abs_ic": 0.0642
+      },
+      {
+        "indicator": "rsi_28",
+        "lag": 2,
+        "ic": 0.0342,
+        "direction": "momentum",
+        "abs_ic": 0.0342
+      },
+      {
+        "indicator": "momentum_24",
+        "lag": 1,
+        "ic": 0.0326,
+        "direction": "momentum",
+        "abs_ic": 0.0326
+      },
+      {
+        "indicator": "rsi_21",
+        "lag": 6,
+        "ic": -0.0249,
+        "direction": "reversion",
+        "abs_ic": 0.0249
+      },
+      {
+        "indicator": "ema_cross_8_21",
+        "lag": 3,
+        "ic": -0.0241,
+        "direction": "reversion",
+        "abs_ic": 0.0241
+      },
+      {
+        "indicator": "ema_cross_20_50",
+        "lag": 3,
+        "ic": 0.0202,
+        "direction": "momentum",
+        "abs_ic": 0.0202
+      },
+      {
+        "indicator": "momentum_12",
+        "lag": 6,
+        "ic": -0.0119,
+        "direction": "reversion",
+        "abs_ic": 0.0119
+      }
+    ],
+    "1h": [
+      {
+        "indicator": "ema_cross_8_21",
+        "lag": 6,
+        "ic": 0.1166,
+        "direction": "momentum",
+        "abs_ic": 0.1166
+      },
+      {
+        "indicator": "momentum_6",
+        "lag": 2,
+        "ic": -0.0873,
+        "direction": "reversion",
+        "abs_ic": 0.0873
+      },
+      {
+        "indicator": "momentum_12",
+        "lag": 6,
+        "ic": 0.0803,
+        "direction": "momentum",
+        "abs_ic": 0.0803
+      },
+      {
+        "indicator": "ema_cross_20_50",
+        "lag": 6,
+        "ic": 0.0745,
+        "direction": "momentum",
+        "abs_ic": 0.0745
+      },
+      {
+        "indicator": "rsi_7",
+        "lag": 6,
+        "ic": 0.0458,
+        "direction": "momentum",
+        "abs_ic": 0.0458
+      },
+      {
+        "indicator": "momentum_24",
+        "lag": 6,
+        "ic": 0.0455,
+        "direction": "momentum",
+        "abs_ic": 0.0455
+      },
+      {
+        "indicator": "rsi_28",
+        "lag": 3,
+        "ic": -0.0432,
+        "direction": "reversion",
+        "abs_ic": 0.0432
+      },
+      {
+        "indicator": "rsi_14",
+        "lag": 6,
+        "ic": 0.0321,
+        "direction": "momentum",
+        "abs_ic": 0.0321
+      },
+      {
+        "indicator": "rsi_21",
+        "lag": 6,
+        "ic": 0.0142,
+        "direction": "momentum",
+        "abs_ic": 0.0142
+      }
+    ]
+  },
+  "qwen_decision": {
+    "timeframe": "4h",
+    "primary_indicator": "rsi_7",
+    "rsi_period": 7,
+    "lag": 6,
+    "regime": "reversion",
+    "confirming": [
+      "ema_cross_20_50",
+      "momentum_12"
+    ],
+    "context_note": "Fade 4h RSI(7) extremes at 6-bar lag for mean-reversion. Use 1h EMA crosses & momentum as trend filters to avoid counter-trend traps. Short only if 1h is bullish & RSI(7)>80; long only if 1h is bearish & RSI(7)<20. Exit after 6 bars. Trade only on confluence.",
+    "rationale": "4h RSI(7) delivers the highest absolute IC (-0.078) for mean-reversion at a 6-bar horizon. 1h trend filters (EMA crosses, momentum) show superior predictive power (>0.07) and provide essential regime context to prevent fading strong directional moves. The 6-bar lag captures the peak information window across both timeframes."
+  },
+  "context_note": "Fade 4h RSI(7) extremes at 6-bar lag for mean-reversion. Use 1h EMA crosses & momentum as trend filters to avoid counter-trend traps. Short only if 1h is bullish & RSI(7)>80; long only if 1h is bearish & RSI(7)<20. Exit after 6 bars. Trade only on confluence.",
+  "suggested": {
+    "timeframe": "4h",
+    "primary_indicator": "rsi_7",
+    "rsi_period": 7,
+    "lag": 6,
+    "regime": "reversion",
+    "confirming": [
+      "ema_cross_20_50",
+      "momentum_12"
+    ]
+  }
+}
