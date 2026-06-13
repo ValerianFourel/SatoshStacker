@@ -1094,3 +1094,128 @@ def test_listener_clear_failure_message(tmp_path, monkeypatch):
     monkeypatch.setattr("os.replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     out = lis.handle_text("/clear")
     assert "couldn't clear" in out.lower() and "nothing was deleted" in out.lower()
+
+
+# ── natural-language composite alarms ("those 3 metrics in sell mode") ──
+def test_nl_to_composite_sell_buy_and_named():
+    from agent.alerts import nl_to_composite, validate_conditions
+    c = validate_conditions(nl_to_composite("tell me when those 3 metrics are in sell mode"))
+    assert c["match"] == "all"
+    assert [x["metric"] for x in c["conditions"]] == ["rsi", "funding", "range_pos"]   # default trio
+    assert all(x["op"] == ">=" for x in c["conditions"])                               # sell = overbought
+    named = validate_conditions(nl_to_composite("alarm me when rsi and funding go into buy mode"))
+    assert {x["metric"] for x in named["conditions"]} == {"rsi", "funding"}
+    assert all(x["op"] == "<=" for x in named["conditions"])                           # buy = oversold
+    anyc = validate_conditions(nl_to_composite("ping me when any of rsi, trend, oi are in sell mode"))
+    assert anyc["match"] == "any" and len(anyc["conditions"]) == 3
+    assert nl_to_composite("what's the price of btc?") is None                         # no mode words
+
+
+def test_composite_alarm_evaluate_all_any_and_rearm():
+    from agent.alerts import evaluate
+    rule = {"id": 1, "match": "all", "armed": True, "conditions": [
+        {"metric": "rsi", "op": ">=", "value": 70}, {"metric": "funding", "op": ">=", "value": 0.05}]}
+    base = {"technicals": {"rsi_14": 78}, "futures": {"funding_rate_pct": 0.09}}
+    assert len(evaluate([rule], base)) == 1                       # both true -> fire once
+    assert evaluate([rule], base) == []                          # still true -> no spam
+    evaluate([rule], {"technicals": {"rsi_14": 60}, "futures": {"funding_rate_pct": 0.09}})  # one drops -> re-arm
+    assert len(evaluate([rule], base)) == 1                       # both true again -> fire
+    # 'all' does NOT fire when only one holds
+    one = {"technicals": {"rsi_14": 78}, "futures": {"funding_rate_pct": 0.0}}
+    rule2 = {"id": 2, "match": "all", "armed": True, "conditions": rule["conditions"]}
+    assert evaluate([rule2], one) == []
+    # 'any' fires when just one holds
+    rule3 = {"id": 3, "match": "any", "armed": True, "conditions": rule["conditions"]}
+    assert len(evaluate([rule3], one)) == 1
+    # missing metric (no futures) -> that condition unmet; 'all' won't fire
+    rule4 = {"id": 4, "match": "all", "armed": True, "conditions": rule["conditions"]}
+    assert evaluate([rule4], {"technicals": {"rsi_14": 78}}) == []
+
+
+def test_listener_creates_composite_alarm_and_lists_it(tmp_path):
+    cfg = WatchConfig(user_alerts_path=str(tmp_path / "a.json"), memory_path=str(tmp_path / "m.jsonl"))
+    snap = {"price": 64000, "technicals": {"rsi_14": 55, "range_position_pct": 50},
+            "futures": {"funding_rate_pct": 0.01}, "volume": {}}
+    lis = TelegramListener(cfg, token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: snap)
+    out = lis.handle_text("tell me when those 3 metrics are in sell mode")
+    assert "Alarm set" in out and "rsi >= 70" in out and "funding >= 0.05" in out
+    lst = lis.handle_text("/alerts")
+    assert "sell mode" in lst and "AND" in lst
+    # a plain question must NOT create an alarm
+    n_before = len(lis.alerts.load())
+    lis.handle_text("is btc in sell mode right now?")
+    assert len(lis.alerts.load()) == n_before
+    # explicit /alarm command works too
+    assert "Alarm set" in lis.handle_text("/alarm rsi and trend in buy mode")
+
+
+def test_monitor_fires_composite_alarm(tmp_path):
+    from agent.alerts import AlertStore
+    apath = str(tmp_path / "a.json")
+    AlertStore(apath).add_composite(
+        [{"metric": "rsi", "op": ">=", "value": 70}, {"metric": "range_pos", "op": ">=", "value": 80}],
+        match="all", label="2 metrics in sell mode (rsi, range_pos)", clock=lambda: 0.0)
+    cfg = WatchConfig(snapshot_path=str(tmp_path / "s.json"), state_path=str(tmp_path / "st.json"),
+                      user_alerts_path=apath, tuned_signals_path=str(tmp_path / "none.json"),
+                      daily_update_tzs=(), alert_charts=False)
+    note = FakeNotifier()
+    mon = MarketMonitor(cfg, notifier=note, analyst=MockAnalyst(), price_fn=lambda: 1,
+                        klines_fn=lambda a, b: [], book_fn=lambda: {}, ticker_fn=lambda: None,
+                        funding_fn=lambda: None, clock=lambda: 0.0)
+    mon._check_user_alerts({"technicals": {"rsi_14": 81, "range_position_pct": 90}})
+    assert any("Alarm fired" in s and "sell mode" in s for s in note.sent)
+
+
+# ── composite-alarm NL robustness (review fixes) ──
+def test_nl_composite_word_boundaries_no_spurious_metrics():
+    from agent.alerts import nl_to_composite, validate_conditions
+    # "signals" must NOT add ls; "exchange" must NOT add change_24h; "arrange" must NOT add range_pos
+    for text, expected in [
+        ("alarm me when rsi signals sell mode", ["rsi"]),
+        ("alarm me when the exchange shows rsi in sell mode", ["rsi"]),
+        ("alert me when arrange and rsi are in sell mode", ["rsi"]),
+        ("alarm me when you point out rsi in sell mode", ["rsi"]),
+    ]:
+        c = validate_conditions(nl_to_composite(text))
+        assert [x["metric"] for x in c["conditions"]] == expected, text
+
+
+def test_nl_composite_number_trim_only_real_counts():
+    from agent.alerts import nl_to_composite, validate_conditions
+    # a stray number ("within 1 hour") must NOT trim explicitly-named metrics
+    c = validate_conditions(nl_to_composite(
+        "alarm me when rsi, funding and range are in sell mode within 1 hour"))
+    assert {x["metric"] for x in c["conditions"]} == {"rsi", "funding", "range_pos"}
+    # "those 3 metrics" still trims the default trio to 3
+    t = validate_conditions(nl_to_composite("tell me when those 3 metrics are in sell mode"))
+    assert len(t["conditions"]) == 3
+
+
+def test_nl_composite_named_metric_unsupported_in_mode_returns_none():
+    from agent.alerts import nl_to_composite
+    # vol_z (volume) has no buy-mode condition -> must NOT silently fall back to the trio
+    assert nl_to_composite("alarm me when volume is in buy mode") is None
+
+
+def test_composite_alarm_no_spam_on_transient_missing_metric():
+    from agent.alerts import evaluate
+    rule = {"id": 1, "match": "all", "armed": True, "conditions": [
+        {"metric": "rsi", "op": ">=", "value": 70}, {"metric": "funding", "op": ">=", "value": 0.05}]}
+    base = {"technicals": {"rsi_14": 78}, "futures": {"funding_rate_pct": 0.09}}
+    assert len(evaluate([rule], base)) == 1                          # fire
+    assert evaluate([rule], {"technicals": {"rsi_14": 78}, "futures": {}}) == []  # funding gap
+    assert rule["armed"] is False                                   # data gap -> NOT re-armed
+    assert evaluate([rule], base) == []                             # data back -> no re-fire spam
+    evaluate([rule], {"technicals": {"rsi_14": 60}, "futures": {"funding_rate_pct": 0.09}})  # real clear
+    assert rule["armed"] is True
+    assert len(evaluate([rule], base)) == 1                          # now re-fires legitimately
+
+
+def test_listener_question_with_alarm_word_is_not_an_alarm(tmp_path):
+    cfg = WatchConfig(user_alerts_path=str(tmp_path / "a.json"), memory_path=str(tmp_path / "m.jsonl"))
+    snap = {"price": 64000, "technicals": {"rsi_14": 85}, "futures": {}, "volume": {}}
+    lis = TelegramListener(cfg, token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: snap)
+    out = lis.handle_text("is this alarming, rsi is at 85?")
+    assert "mock answer" in out and lis.alerts.load() == []          # answered, no alarm created

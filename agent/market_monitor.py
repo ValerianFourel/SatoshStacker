@@ -495,8 +495,9 @@ class MarketMonitor:
         self.detector.cadence = p["cadence"]
 
     def _check_user_alerts(self, m: dict) -> None:
-        """Evaluate user-defined trigger rules against the live snapshot; ping on fire."""
-        from .alerts import evaluate
+        """Evaluate user-defined trigger rules (single + composite) against the live snapshot;
+        ping on fire. These are EXPLICIT operator alarms — never gated by sensitivity/mute."""
+        from .alerts import evaluate, fired_text
         rules = self.alerts.load()
         if not rules:
             return
@@ -504,10 +505,8 @@ class MarketMonitor:
         fired = evaluate(rules, m)
         if before != [r.get("armed", True) for r in rules]:
             self.alerts.save(rules)        # persist arm/disarm only when it changed
-        for rule, val in fired:
-            self.notifier.send(
-                f"🔔 *Trigger fired* — `{rule['metric']} {rule['op']} {rule['value']}`"
-                f"  →  now `{val:g}`   (#{rule['id']})")
+        for rule, info in fired:
+            self.notifier.send(fired_text(rule, info))
 
     def _multi_tf(self, now: float) -> dict:
         """RSI(14) + EMA trend per 5m/1h/4h/1d so the LLM sees each timeframe by name.

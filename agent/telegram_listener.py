@@ -42,6 +42,9 @@ _HELP = (
     "`/news` — BTC headlines + Fear&Greed (day/week/month)\n"
     "`/alert <metric> <op> <value>` — custom trigger, e.g. `/alert rsi > 70` "
     "(or _ping me when rsi above 70_) · `/alerts` · `/delalert <id>`\n"
+    "`/alarm <plain text>` — multi-metric alarm, e.g. _alarm me when rsi, funding & range "
+    "are in sell mode_ (fires when *all* of them flip together) · or just _tell me when "
+    "those 3 metrics go into buy mode_\n"
     "`/search <query>` — search the web, read the top articles, summarize\n"
     "`/sensitivity [low|normal|high]` — how easily I alert (low = fewest) · `/mute` · `/unmute`\n"
     "`/notes` — list scratch files · `/get <file>` — read one\n"
@@ -265,11 +268,14 @@ class TelegramListener:
             except Exception as e:  # noqa: BLE001
                 return f"can't read that file: {e}"
         if low == "/alerts":
+            from .alerts import describe_rule
             rules = self.alerts.load()
             if not rules:
-                return "🔔 no triggers set — e.g. `/alert rsi > 70` or _ping me when rsi above 70_"
-            return "🔔 *Triggers:*\n" + "\n".join(
-                f"#{r['id']}  `{r['metric']} {r['op']} {r['value']}`" for r in rules)
+                return ("🔔 no alarms set — e.g. `/alert rsi > 70`, _ping me when rsi above 70_, "
+                        "or _alarm me when rsi, funding & range are in sell mode_")
+            return "🔔 *Alarms:*\n" + "\n".join(describe_rule(r) for r in rules)
+        if low.split(" ", 1)[0] in ("/alarm",) and len(text.split()) > 1:
+            return self._make_alarm(text.split(" ", 1)[1], snap)
         if low.startswith("/alert "):
             return self._add_alert(text[7:], snap)
         if low.startswith("/delalert "):
@@ -291,13 +297,16 @@ class TelegramListener:
             tgt, anc, ap = _parse_levels_args(text)
             return levels_text(snap, target_pct=tgt, fee_pct=self.cfg.fee_pct,
                                anchor=anc, anchor_price=ap)
-        # natural-language trigger: "ping me when rsi above 70"
+        # natural-language alarm: single ("ping me when rsi above 70") OR composite
+        # ("alert me when rsi, funding & range are in sell mode"). Requires explicit alarm
+        # INTENT phrases — so a plain question ("is this alarming?", "is btc in sell mode?")
+        # stays a question and never silently creates an alarm.
         if any(p in low for p in ("ping me when", "alert me when", "notify me when",
-                                  "let me know when", "tell me when")):
-            rule = _nl_to_rule(text)
-            if not rule:
-                return "tell me like: _ping me when rsi above 70_  (or `/alert rsi > 70`)"
-            return self._add_alert(f"{rule[0]} {rule[1]} {rule[2]}", snap)
+                                  "let me know when", "tell me when", "alarm me", "alarm when",
+                                  "alarm if", "alarm for", "set an alarm", "set up an alarm",
+                                  "make an alarm", "create an alarm", "set an alert",
+                                  "set up an alert")):
+            return self._make_alarm(text, snap)
         # natural-language chart request -> send the LLM-orchestrated patchwork
         if "show me" in low or any(w in low for w in ("chart", "plot", "graph", "draw")):
             self._send_charts(snap, question=text)
@@ -402,6 +411,36 @@ class TelegramListener:
                 "`/sensitivity set <key> <value>` — e.g. `set imbalance 0.95` (raises the bar)\n"
                 "`/sensitivity off <signal>` — e.g. `off imbalance` (silence one signal) · `on <signal>`\n"
                 "`/sensitivity reset` — clear all manual changes\n\n" + fmt(self._prefs_full()))
+
+    def _make_alarm(self, text: str, snap) -> str:
+        """Natural text -> an alarm. A COMPOSITE ('… in sell mode', multi-metric) takes priority,
+        else a single-metric trigger. Explicit operator alarms always fire (not gated by
+        sensitivity/mute). The confirmation lists the exact conditions so 'those 3 metrics' is
+        transparent — the operator sees which metrics & thresholds were chosen."""
+        from .alerts import nl_to_composite, validate_conditions
+        raw = nl_to_composite(text)
+        comp = validate_conditions(raw) if raw else None
+        if comp and len(comp["conditions"]) >= 2:
+            r = self.alerts.add_composite(comp["conditions"], comp.get("match", "all"),
+                                          comp.get("label", ""))
+            return self._confirm_alarm(r)
+        rule = _nl_to_rule(text)                       # single-metric ("ping me when rsi above 70")
+        if rule:
+            return self._add_alert(f"{rule[0]} {rule[1]} {rule[2]}", snap)
+        if comp and comp["conditions"]:                # a one-condition mode request still works
+            c = comp["conditions"][0]
+            return self._add_alert(f"{c['metric']} {c['op']} {c['value']}", snap)
+        return ("tell me like: _alarm me when rsi, funding & range are in sell mode_ · "
+                "_ping me when rsi above 70_ · or `/alert rsi > 70`.\n"
+                "_(in sell mode = overbought/frothy; buy mode = oversold/washed-out)_")
+
+    def _confirm_alarm(self, rule: dict) -> str:
+        from .alerts import describe_rule
+        how = ("all of these are true together" if rule.get("match", "all") != "any"
+               else "any of these is true")
+        return (f"✅ *Alarm set* — I'll ping you when {how}:\n{describe_rule(rule)}\n"
+                f"Name specific metrics to change them · `/alerts` to list · "
+                f"`/delalert {rule['id']}` to remove.")
 
     def _add_alert(self, spec: str, snap) -> str:
         from .alerts import SUPPORTED, parse_rule, resolve_metric

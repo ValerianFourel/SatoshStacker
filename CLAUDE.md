@@ -72,6 +72,16 @@ talk-only assistant). Two ways the LLM gets called:
   restart — which signals may ping, how many must agree (confluence ±), the cadence (±), the
   preset, and mute. Taps mutate `watch_prefs.json`; the monitor picks them up within ~15s.
   Callbacks are operator-chat-gated and never crash the poll loop.
+- **Composite alarms (`alerts.py` `nl_to_composite` + `/alarm`):** natural-language multi-metric
+  alarms — "tell me when those 3 metrics are in sell mode" / "alert me when rsi, funding & range
+  are in sell mode" → a composite rule that pings when ALL (or ANY) per-metric mode conditions
+  hold (sell = overbought bars, buy = oversold). Word-boundary parsing (no spurious metrics),
+  count-trim only on the default trio, fire-once + re-arm, and a data-gap can't cause re-fire
+  spam. These explicit operator alarms always fire (never gated by sensitivity/mute). Single
+  `/alert <metric> <op> <value>` triggers are unchanged.
+- **Multi-day memory (`memory.py`):** JSONL transcript of chat + searches, ~1-week auto-erase,
+  `/memory` stats, `/clear` (+ `/clear old`). Fed back to the analyst as recent_chat +
+  recent_searches. Replies are never gated by sensitivity/mute.
 - **Autonomous news (`_maybe_news_digest` + `analyst.news_digest`):** every
   `WATCH_NEWS_DIGEST_HOURS` (~8h) the analyst reads the news regardless, caches a copy to
   `news_digest_path` (`/digest` to read it), and pings **only if it itself decides** the news
