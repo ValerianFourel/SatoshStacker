@@ -62,9 +62,22 @@ A **separate, non-trading** service (operator request): it continuously watches 
 talk-only assistant). Two ways the LLM gets called:
 - **Proactive:** `market_monitor.py` computes order-book depth/imbalance, volume-surge,
   realized-vol/ATR, RSI/EMA/24h-range every `WATCH_SCAN_INTERVAL_S`; an `AnomalyDetector`
-  fires on **out-of-the-norm events (peak / bottom / volume & price spikes)** with a
-  per-signal cooldown + re-arm (one episode = one alert, survives restart). On fire it
+  fires on **out-of-the-norm events (peak / bottom / volume & price spikes)**. By default it
+  uses **confluence** (`WATCH_CONFLUENCE_MIN=2`): it pings the whole agreeing bundle only when
+  **≥N signals are out-of-norm at once**, then stays quiet for a global **cadence**
+  (`WATCH_ALERT_CADENCE_S`, ~30m) and until the cluster disperses + re-arms (one episode = one
+  alert, survives restart). `confluence=1` restores the classic per-signal model. On fire it
   auto-calls the analyst and pushes the read to Telegram.
+- **`/origins` widget:** an inline-keyboard control panel (`origins.py`) to tune — live, no
+  restart — which signals may ping, how many must agree (confluence ±), the cadence (±), the
+  preset, and mute. Taps mutate `watch_prefs.json`; the monitor picks them up within ~15s.
+  Callbacks are operator-chat-gated and never crash the poll loop.
+- **Autonomous news (`_maybe_news_digest` + `analyst.news_digest`):** every
+  `WATCH_NEWS_DIGEST_HOURS` (~8h) the analyst reads the news regardless, caches a copy to
+  `news_digest_path` (`/digest` to read it), and pings **only if it itself decides** the news
+  is material (reply starts `ALERT`; `QUIET` is cached silently). Mute suppresses the ping but
+  the copy is still kept. An upgrade-notice fires once on existing installs explaining the
+  confluence/cadence/news change and pointing at `/origins`.
 - **On-demand:** `telegram_listener.py` long-polls `getUpdates` **gated to `TELEGRAM_CHAT_ID`**
   (strangers ignored); `/btc`·`/status` → LLM read, `/raw` → numbers only, free text → answer.
 

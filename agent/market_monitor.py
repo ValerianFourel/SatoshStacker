@@ -258,8 +258,12 @@ class AnomalyDetector:
     muted: bool = False            # True -> no proactive alerts at all
     overrides: dict = field(default_factory=dict)  # manual per-bar overrides (preset key -> val)
     disabled: tuple = ()           # Signal.name values the user turned off (e.g. book_imbalance)
-    # per-signal state: {"last_fired": ts, "armed": bool, "clear_since": ts|None}
+    confluence: int = 1            # >=2 -> only ping when this many signals are active AT ONCE
+    cadence: "int | None" = None   # min seconds between confluence pings (None -> preset cooldown)
+    # per-signal state: {"last_fired": ts, "armed": bool, "clear_since": ts|None}; a reserved
+    # "__confluence__" key holds the cluster-level state when confluence>=2.
     _state: dict = field(default_factory=dict)
+    CONFLUENCE_KEY = "__confluence__"
 
     def load_state(self, d: dict) -> None:
         if isinstance(d, dict):
@@ -352,18 +356,28 @@ class AnomalyDetector:
         return out
 
     def evaluate(self, m: dict, *, now_ts: float) -> list[Signal]:
-        """Signals that should fire NOW. A signal fires only if it is armed AND its
-        cooldown has elapsed; firing disarms it. It re-arms ONLY after its reading has
-        been clear of the bar for ``rearm`` seconds straight — so a value hovering at the
-        threshold (one flickering scan off) does NOT re-fire. One episode = one alert."""
+        """Signals that should ping NOW. With ``confluence`` <= 1 this is the classic
+        per-signal model (each fires independently, own cooldown + re-arm). With
+        ``confluence`` >= K it switches to a CLUSTER model: ping the whole active bundle
+        once only when >= K signals are out-of-norm together, then stay quiet for the
+        cadence AND until the cluster disperses (< K active) long enough to re-arm.
+        One episode = one alert either way."""
         if self.muted:
             return []
+        active = self._conditions(m)
+        if int(self.confluence or 1) >= 2:
+            return self._evaluate_confluence(active, now_ts)
+        return self._evaluate_per_signal(active, now_ts)
+
+    def _evaluate_per_signal(self, active_list: list[Signal], now_ts: float) -> list[Signal]:
         T = self._thr()
         cooldown, rearm = T["cooldown"], T["rearm"]
-        active = {s.name: s for s in self._conditions(m)}
+        active = {s.name: s for s in active_list}
         fired: list[Signal] = []
         # hysteresis re-arm: require a *sustained* clear streak, not a single off-scan
         for name, st in self._state.items():
+            if name == self.CONFLUENCE_KEY:
+                continue
             if name in active:
                 st["clear_since"] = None                       # back on the bar -> reset streak
             else:
@@ -382,6 +396,31 @@ class AnomalyDetector:
                 st["armed"] = False
                 st["clear_since"] = None
         return fired
+
+    def _evaluate_confluence(self, active_list: list[Signal], now_ts: float) -> list[Signal]:
+        """Cluster gate: ping once when >= K signals are active together; then quiet until
+        the cadence elapses AND the cluster disperses (< K active) for ``rearm`` seconds."""
+        T = self._thr()
+        K = max(2, int(self.confluence))
+        cadence = self.cadence if self.cadence is not None else T["cooldown"]
+        rearm = T["rearm"]
+        st = self._state.setdefault(self.CONFLUENCE_KEY,
+                                    {"last_fired": None, "armed": True, "clear_since": None})
+        if len(active_list) >= K:
+            st["clear_since"] = None                           # cluster present -> reset streak
+            lf = st.get("last_fired")
+            cooled = lf is None or (now_ts - lf) >= cadence
+            if st.get("armed", True) and cooled:
+                st["last_fired"] = now_ts
+                st["armed"] = False
+                return list(active_list)                       # fire the whole agreeing bundle
+            return []
+        # below confluence: start/continue the dispersal streak; re-arm once clear long enough
+        if st.get("clear_since") is None:
+            st["clear_since"] = now_ts
+        elif now_ts - st["clear_since"] >= rearm:
+            st["armed"] = True
+        return []
 
 
 # ─────────────────────────────── the monitor loop ───────────────────────────
@@ -445,11 +484,15 @@ class MarketMonitor:
         if not force and mt == self._prefs_mtime:
             return
         self._prefs_mtime = mt
-        p = read_prefs(path, default_level=self.cfg.sensitivity)
+        p = read_prefs(path, default_level=self.cfg.sensitivity,
+                       default_confluence=self.cfg.confluence_min,
+                       default_cadence=self.cfg.alert_cadence_s)
         self.detector.level = p["sensitivity"]
         self.detector.muted = p["muted"]
         self.detector.overrides = p["overrides"]
         self.detector.disabled = tuple(p["disabled"])
+        self.detector.confluence = p["confluence"]
+        self.detector.cadence = p["cadence"]
 
     def _check_user_alerts(self, m: dict) -> None:
         """Evaluate user-defined trigger rules against the live snapshot; ping on fire."""
@@ -533,6 +576,39 @@ class MarketMonitor:
                 self._save_state()
                 self._send_daily_update(m, tzname, local)
 
+    def _maybe_news_digest(self, now_ts: float, m: dict) -> None:
+        """Every ``news_digest_hours`` the analyst reads the news REGARDLESS of activity,
+        a copy is cached, and it pings ONLY if the analyst itself decides the news is worth
+        flagging (reply starts with 'ALERT'). 'QUIET' reads are cached silently. Mute
+        suppresses the ping but the read + cache still happen ('keep a copy')."""
+        interval = max(900.0, float(self.cfg.news_digest_hours) * 3600.0)
+        last = float(self._sched.get("news_digest_ts", 0) or 0)
+        if now_ts - last < interval:
+            return
+        self._sched["news_digest_ts"] = now_ts
+        self._save_state()
+        reply = ""
+        if self.cfg.analyst_enabled and self.analyst is not None:
+            try:
+                reply = self.analyst.news_digest(m) or ""
+            except Exception as e:  # noqa: BLE001 - a digest must never break the loop
+                log.warning("news digest LLM failed: %s", e)
+                return
+        decided_alert = reply.strip().upper().startswith("ALERT")
+        body = reply.split(":", 1)[-1].strip() if ":" in reply.split("\n", 1)[0] else reply.strip()
+        self._cache_news_digest(now_ts, reply, body, decided_alert)
+        if decided_alert and body and not self.detector.muted:
+            self.notifier.send(f"📰 *BTC news watch* — worth flagging\n{body}")
+
+    def _cache_news_digest(self, now_ts: float, reply: str, body: str, alert: bool) -> None:
+        try:
+            _atomic_write_json(self.cfg.news_digest_path, {
+                "ts": now_ts,
+                "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+                "alert": bool(alert), "body": body, "raw": reply})
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not cache news digest: %s", e)
+
     def _send_daily_update(self, m: dict, tzname: str, local) -> None:
         from .analyst import numeric_summary
         city = tzname.split("/")[-1].replace("_", " ")
@@ -588,6 +664,7 @@ class MarketMonitor:
             self._save_state()
         self._check_user_alerts(m)
         self._maybe_daily_update(now, m)
+        self._maybe_news_digest(now, m)            # autonomous 8h news read (LLM decides to ping)
         return m
 
     _ICON = {"peak": "📈", "bottom": "📉", "spike": "⚡", "microstructure": "📖"}

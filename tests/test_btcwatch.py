@@ -167,6 +167,8 @@ def test_monitor_run_once_fires_event_and_writes_snapshot(tmp_path):
                       user_alerts_path=str(tmp_path / "alerts.json"),  # isolated alerts
                       prefs_path=str(tmp_path / "prefs.json"),         # isolated prefs
                       sensitivity="high",                              # old loose bars for this craft
+                      confluence_min=1,                                # this test exercises single-signal firing
+                      news_digest_hours=1e9,                           # don't fire a digest in this test
                       daily_update_tzs=())                             # no digest in this test
     note = FakeNotifier()
 
@@ -582,7 +584,8 @@ def test_sensitivity_prefs_and_listener_commands(tmp_path):
     from agent.sensitivity import read_prefs, write_prefs
     p = str(tmp_path / "prefs.json")
     assert read_prefs(p, default_level="normal") == {
-        "sensitivity": "normal", "muted": False, "overrides": {}, "disabled": []}
+        "sensitivity": "normal", "muted": False, "overrides": {}, "disabled": [],
+        "confluence": 2, "cadence": 1800}
     write_prefs(p, sensitivity="high")
     assert read_prefs(p)["sensitivity"] == "high"
     write_prefs(p, muted=True)
@@ -818,3 +821,183 @@ def test_listener_search_date_tokens():
     out = lis.handle_text("/search btc etf flows between:2026-01-01..2026-02-01")
     assert "btc etf flows" in out and "2026-01-01" in out and "2026-02-01" in out
     assert lis.handle_text("/search halving news after:2024-04-01").count("2024-04-01")
+
+
+# ── confluence (>=2 signals must agree) ──
+def _multi_active():
+    """A snapshot with two distinct out-of-norm signals active: peak + volume spike."""
+    m = make_metrics(pct_from_high_24h=0.0, rsi_14=80.0)   # peak
+    m["volume"] = {"z": 4.5, "surge_x": 6.0}               # volume_spike
+    return m
+
+
+def test_confluence_requires_multiple_signals():
+    det = AnomalyDetector(WatchConfig(), confluence=2)
+    one = make_metrics(pct_from_high_24h=0.0, rsi_14=80.0)        # only 'peak' active
+    assert det.evaluate(one, now_ts=0.0) == []                   # 1 < 2 -> no ping (the fix)
+    fired = det.evaluate(_multi_active(), now_ts=10.0)
+    assert {s.name for s in fired} == {"peak", "volume_spike"}   # whole agreeing bundle pings
+    assert det.evaluate(_multi_active(), now_ts=11.0) == []       # disarmed within the episode
+
+
+def test_confluence_cadence_then_rearm():
+    cfg = WatchConfig()
+    det = AnomalyDetector(cfg, confluence=2)         # cadence -> cooldown 1800, rearm 600
+    assert len(det.evaluate(_multi_active(), now_ts=0.0)) == 2    # episode 1 fires
+    # cluster persists PAST the cadence but never disperses -> still silent (one episode)
+    assert det.evaluate(_multi_active(), now_ts=cfg.alert_cooldown_s + 5) == []
+    base = cfg.alert_cooldown_s + 10
+    det.evaluate(make_metrics(), now_ts=base)                              # dispersal streak starts
+    det.evaluate(make_metrics(), now_ts=base + cfg.rearm_clear_s + 1)      # clear long enough -> re-arm
+    fired2 = det.evaluate(_multi_active(), now_ts=base + cfg.rearm_clear_s + 2)
+    assert len(fired2) == 2                                       # fresh cluster pings again
+
+
+def test_confluence_custom_cadence_throttles():
+    det = AnomalyDetector(WatchConfig(), confluence=2, cadence=1800)
+    assert len(det.evaluate(_multi_active(), now_ts=0.0)) == 2
+    # disperse to re-arm, but only 100s elapsed (< 1800 cadence) -> still throttled
+    det.evaluate(make_metrics(), now_ts=10.0)
+    det.evaluate(make_metrics(), now_ts=700.0)                   # re-armed (>600 clear)
+    assert det.evaluate(_multi_active(), now_ts=701.0) == []     # cadence not yet elapsed
+
+
+def test_confluence_one_preserves_single_fire():
+    det = AnomalyDetector(WatchConfig(), confluence=1)           # off -> classic behaviour
+    one = make_metrics(pct_from_high_24h=0.0, rsi_14=80.0)
+    assert [s.name for s in det.evaluate(one, now_ts=0.0)] == ["peak"]
+
+
+# ── /origins widget (pure logic) ──
+def test_origins_widget_text_and_keyboard():
+    from agent.origins import ORIGINS, keyboard, widget_text
+    prefs = {"sensitivity": "high", "muted": False, "overrides": {}, "disabled": [],
+             "confluence": 2, "cadence": 1800}
+    txt = widget_text(prefs)
+    assert "Update controls" in txt and "Confluence" in txt and "≥2" in txt and "30m" in txt
+    flat = [b["callback_data"] for row in keyboard(prefs)["inline_keyboard"] for b in row]
+    for canon, _e, _l in ORIGINS:
+        assert f"og:t:{canon}" in flat                           # every origin is a toggle
+    assert "og:c:+" in flat and "og:d:-" in flat and "og:x" in flat
+
+
+def test_origins_apply_callback_toggle_and_clamps():
+    from agent.origins import apply_callback
+    prefs = {"sensitivity": "low", "muted": False, "overrides": {}, "disabled": [],
+             "confluence": 2, "cadence": 1800}
+    off, toast = apply_callback("og:t:book_imbalance", prefs)
+    assert "book_imbalance" in off["disabled"] and "silenced" in toast
+    on, _ = apply_callback("og:t:book_imbalance", off)
+    assert "book_imbalance" not in on["disabled"]
+    assert apply_callback("og:c:+", prefs)[0]["confluence"] == 3
+    lo = apply_callback("og:c:-", prefs)[0]
+    assert lo["confluence"] == 1 and apply_callback("og:c:-", lo)[0]["confluence"] == 1   # clamp
+    assert apply_callback("og:d:-", prefs)[0]["cadence"] == 1500          # -5 min
+    assert apply_callback("og:p", prefs)[0]["sensitivity"] == "normal"    # cycle preset
+    assert apply_callback("og:m", prefs)[0]["muted"] is True
+    assert apply_callback("og:r", prefs) == (None, "")                    # refresh -> no change
+    assert apply_callback("og:x", prefs)[0] is None                       # close -> no change
+    assert apply_callback("bogus", prefs)[0] is None
+
+
+# ── autonomous 8h news digest ──
+class _DigestAnalyst:
+    def __init__(self, reply):
+        self.reply = reply
+        self.last_plot = []
+
+    def news_digest(self, m):
+        return self.reply
+
+
+def _digest_monitor(tmp_path, analyst, *, clock):
+    cfg = WatchConfig(state_path=str(tmp_path / "st.json"), snapshot_path=str(tmp_path / "sn.json"),
+                      news_digest_path=str(tmp_path / "nd.json"), news_digest_hours=8.0,
+                      daily_update_tzs=(), alert_charts=False,
+                      tuned_signals_path=str(tmp_path / "none.json"),
+                      user_alerts_path=str(tmp_path / "a.json"), prefs_path=str(tmp_path / "p.json"))
+    note = FakeNotifier()
+    mon = MarketMonitor(cfg, notifier=note, analyst=analyst, price_fn=lambda: 1,
+                        klines_fn=lambda a, b: [], book_fn=lambda: {}, ticker_fn=lambda: None,
+                        funding_fn=lambda: None, clock=clock)
+    return cfg, note, mon
+
+
+def test_news_digest_alert_pings_caches_and_throttles(tmp_path):
+    now = 5_000_000.0
+    cfg, note, mon = _digest_monitor(tmp_path, _DigestAnalyst("ALERT: ETF outflows accelerating"),
+                                     clock=lambda: now)
+    m = {"price": 1, "technicals": {}, "volume": {}, "order_book": {}, "time": {}}
+    mon._maybe_news_digest(now, m)
+    assert any("news watch" in s for s in note.sent)             # it decided to ping
+    cached = json.load(open(cfg.news_digest_path))
+    assert cached["alert"] is True and "ETF" in cached["body"]   # copy kept
+    before = len(note.sent)
+    mon._maybe_news_digest(now + 60, m)                          # < 8h later -> throttled
+    assert len(note.sent) == before
+
+
+def test_news_digest_quiet_is_silent_but_cached(tmp_path):
+    now = 5_000_000.0
+    cfg, note, mon = _digest_monitor(tmp_path, _DigestAnalyst("QUIET: nothing notable"),
+                                     clock=lambda: now)
+    mon._maybe_news_digest(now, {"price": 1})
+    assert note.sent == []                                       # QUIET -> no ping
+    assert json.load(open(cfg.news_digest_path))["alert"] is False
+
+
+def test_news_digest_muted_caches_but_silent(tmp_path):
+    now = 5_000_000.0
+    cfg, note, mon = _digest_monitor(tmp_path, _DigestAnalyst("ALERT: big news"), clock=lambda: now)
+    mon.detector.muted = True                                    # muted suppresses the ping
+    mon._maybe_news_digest(now, {"price": 1})
+    assert note.sent == []                                       # silenced
+    assert json.load(open(cfg.news_digest_path))["alert"] is True  # ...but still kept a copy
+
+
+# ── listener: /origins + /digest routing + callback gating ──
+def test_listener_origins_and_digest_routing(tmp_path, monkeypatch):
+    class _Resp:
+        def json(self):
+            return {"ok": True, "result": {}}
+    posts = []
+    monkeypatch.setattr("requests.post", lambda url, **k: posts.append(url) or _Resp())
+    from agent.sensitivity import read_prefs
+    p = str(tmp_path / "p.json")
+    lis = TelegramListener(WatchConfig(prefs_path=p, news_digest_path=str(tmp_path / "nd.json")),
+                           token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: {})
+    assert "Update controls" in lis.handle_text("/origins")      # text view
+    assert "no autonomous digest" in lis.handle_text("/digest")  # nothing cached yet
+    # a button tap from the operator persists to the same prefs file
+    lis._handle_callback({"id": "1", "data": "og:t:book_imbalance",
+                          "message": {"chat": {"id": 42}, "message_id": 7}})
+    assert "book_imbalance" in read_prefs(p)["disabled"]
+    lis._handle_callback({"id": "2", "data": "og:c:+",
+                          "message": {"chat": {"id": 42}, "message_id": 7}})
+    assert read_prefs(p)["confluence"] == 3
+    # a tap from a stranger changes nothing
+    lis._handle_callback({"id": "3", "data": "og:c:+",
+                          "message": {"chat": {"id": 999}, "message_id": 7}})
+    assert read_prefs(p)["confluence"] == 3
+    # the /origins command sends an interactive panel (sendMessage hit)
+    lis._process_update({"message": {"chat": {"id": 42}, "text": "/origins"}})
+    assert any("sendMessage" in u for u in posts)
+
+
+def test_upgrade_notice_fires_once_and_bakes_prefs(tmp_path):
+    from agent.btcwatch import _maybe_upgrade_notice
+    from agent.sensitivity import read_prefs, write_prefs
+    p = str(tmp_path / "prefs.json")
+    write_prefs(p, sensitivity="high", overrides={"imb": 0.86})    # an OLD-format prefs file...
+    # simulate the live file having no confluence/cadence keys
+    raw = json.load(open(p)); raw.pop("confluence", None); raw.pop("cadence", None)
+    json.dump(raw, open(p, "w"))
+    cfg = WatchConfig(prefs_path=p, upgrade_marker=str(tmp_path / "up.marker"))
+    note = FakeNotifier()
+    assert _maybe_upgrade_notice(cfg, note) is True                # existing install -> notify
+    assert len(note.sent) == 1 and "What changed" in note.sent[0]
+    baked = read_prefs(p)
+    assert baked["confluence"] == 2 and baked["sensitivity"] == "high"  # defaults baked, prefs kept
+    assert _maybe_upgrade_notice(cfg, note) is False               # restart -> no resend
+    assert len(note.sent) == 1

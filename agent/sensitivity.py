@@ -23,6 +23,12 @@ PRESETS = {
 }
 ORDER = ("low", "normal", "high")          # quiet -> chatty
 
+# confluence: how many signals must be out-of-norm AT ONCE to ping; cadence: min gap (s).
+DEFAULT_CONFLUENCE = 2
+DEFAULT_CADENCE_S = 1800
+CONFLUENCE_RANGE = (1, 6)                    # widget clamp
+CADENCE_RANGE_S = (300, 14_400)             # 5 min … 4 h widget clamp
+
 # friendly name -> canonical threshold key (for `/sensitivity set <key> <value>`)
 KEY_ALIAS = {
     "imb": "imb", "imbalance": "imb", "book": "imb",
@@ -63,8 +69,15 @@ def effective(level: str | None, overrides: dict | None) -> dict:
     return base
 
 
-def read_prefs(path: str, *, default_level: str = "low") -> dict:
-    """{'sensitivity', 'muted', 'overrides', 'disabled'}. Missing/garbage -> safe defaults."""
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def read_prefs(path: str, *, default_level: str = "low",
+               default_confluence: int = DEFAULT_CONFLUENCE,
+               default_cadence: int = DEFAULT_CADENCE_S) -> dict:
+    """{'sensitivity','muted','overrides','disabled','confluence','cadence'}.
+    Missing/garbage -> safe defaults."""
     try:
         with open(path) as f:
             d = json.load(f)
@@ -76,8 +89,18 @@ def read_prefs(path: str, *, default_level: str = "low") -> dict:
         if k in PRESETS["low"] and isinstance(v, (int, float)):
             ov[k] = float(v)
     dis = [s for s in (d.get("disabled") or []) if isinstance(s, str)]
+    try:
+        conf = int(d.get("confluence", default_confluence))
+    except (TypeError, ValueError):
+        conf = default_confluence
+    try:
+        cad = int(d.get("cadence", default_cadence))
+    except (TypeError, ValueError):
+        cad = default_cadence
     return {"sensitivity": lvl if lvl in PRESETS else default_level,
-            "muted": bool(d.get("muted", False)), "overrides": ov, "disabled": dis}
+            "muted": bool(d.get("muted", False)), "overrides": ov, "disabled": dis,
+            "confluence": _clamp(conf, *CONFLUENCE_RANGE),
+            "cadence": _clamp(cad, *CADENCE_RANGE_S)}
 
 
 def write_prefs(path: str, **changes) -> dict:
@@ -97,7 +120,8 @@ def write_prefs(path: str, **changes) -> dict:
 
 
 def describe(level: str, muted: bool, overrides: dict | None = None,
-             disabled: list | None = None) -> str:
+             disabled: list | None = None, confluence: int | None = None,
+             cadence: int | None = None) -> str:
     p = effective(level, overrides)
     overrides, disabled = overrides or {}, disabled or []
     bar = {"low": "🟢 quiet", "normal": "🟡 balanced", "high": "🔴 chatty"}.get(level, level)
@@ -108,10 +132,16 @@ def describe(level: str, muted: bool, overrides: dict | None = None,
             f"vol z≥{p['vol_z']:g}{star('vol_z')} · |imbalance|≥{p['imb']:g}{star('imb')} · "
             f"|funding|≥{p['fund']:g}{star('fund')}% · OI≥{p['oi']:g}{star('oi')}%"),
            f"   cooldown {int(p['cooldown']) // 60}m · re-arms after {int(p['rearm']) // 60}m clear"]
+    if confluence is not None:
+        c = max(1, int(confluence))
+        cad = int(cadence if cadence is not None else DEFAULT_CADENCE_S) // 60
+        out.append(f"   🧩 *confluence:* need ≥{c} signal{'s' if c != 1 else ''} at once · "
+                   f"≤1 ping / {cad}m" if c > 1 else
+                   f"   🧩 *confluence:* off (any single signal can ping) · ≤1 ping / {cad}m")
     if disabled:
         out.append("   🚫 *off:* " + ", ".join(disabled))
     if overrides:
         out.append("   ✋ *manual* (★): " + ", ".join(f"{k}={v:g}" for k, v in overrides.items()))
-    out.append("   `/sensitivity low|normal|high` · `set <key> <val>` · `off <signal>` · "
-               "`on <signal>` · `reset` · `/mute`")
+    out.append("   `/origins` to tune which signals ping & how many must agree · "
+               "`/sensitivity low|normal|high` · `set <key> <val>` · `/mute`")
     return "\n".join(out)

@@ -18,11 +18,15 @@ log = logging.getLogger("satoshistacker.listener")
 _HELP = (
     "🛰️ *SatoshiStacker BTC watch* — read-only. I never trade; I watch, analyze & explain.\n"
     "\n"
-    "*On my own:* I monitor BTC 24/7 (order book, volume, volatility, RSI/EMA) and ping you "
-    "when something's out of the norm — a likely *top/peak*, *bottom*, or *volume/price spike* "
-    "— with an LLM read (plus news if it's relevant).\n"
+    "*On my own:* I monitor BTC 24/7 (order book, volume, volatility, RSI/EMA). To avoid "
+    "noise I only ping when *several* signals are out-of-norm at once (confluence) and at "
+    "most about once every 30 min — with an LLM read. I also read the news every ~8h on my "
+    "own, keep a copy (`/digest`), and only ping if I judge it market-moving.\n"
     "\n"
     "*Commands*\n"
+    "`/origins` — 🛰️ control panel: tap which signals may ping, how many must agree, the "
+    "cadence, the preset, mute — all live\n"
+    "`/digest` — my latest autonomous news read (kept copy)\n"
     "`/btc` or `/status` — my read of BTC right now\n"
     "`/raw` — just the numbers, no LLM\n"
     "`/chart` — price + the leading indicators, plotted\n"
@@ -207,6 +211,11 @@ class TelegramListener:
         if low in ("/onchain", "/mvrv", "/sopr", "/nupl"):
             from .onchain import onchain_text
             return onchain_text((snap or {}).get("onchain") or {})
+        if low.split(" ", 1)[0] in ("/origins", "/panel", "/sources", "/widget", "/controls"):
+            from .origins import widget_text
+            return widget_text(self._prefs_full())   # text view; _process_update sends buttons
+        if low in ("/digest", "/newsdigest"):
+            return self._digest_text()
         if low.split(" ", 1)[0] in ("/sensitivity", "/sens"):
             return self._sensitivity_cmd(text)
         if low in ("/mute", "/silence"):
@@ -216,8 +225,8 @@ class TelegramListener:
         if low == "/unmute":
             from .sensitivity import describe
             p = self._update_prefs(muted=False)
-            return "🔔 *Unmuted.*\n" + describe(p["sensitivity"], p["muted"],
-                                                p["overrides"], p["disabled"])
+            return "🔔 *Unmuted.*\n" + describe(p["sensitivity"], p["muted"], p["overrides"],
+                                                p["disabled"], p.get("confluence"), p.get("cadence"))
         if low == "/news":
             from .websearch import news_line
             return news_line(self.news_fn()) if self.news_fn else "news disabled"
@@ -300,7 +309,9 @@ class TelegramListener:
 
     def _prefs_full(self):
         from .sensitivity import read_prefs
-        return read_prefs(self.cfg.prefs_path, default_level=self.cfg.sensitivity)
+        return read_prefs(self.cfg.prefs_path, default_level=self.cfg.sensitivity,
+                          default_confluence=self.cfg.confluence_min,
+                          default_cadence=self.cfg.alert_cadence_s)
 
     def _update_prefs(self, **changes):
         """Read current prefs, apply changes, write ALL fields so none clobbers another.
@@ -309,12 +320,28 @@ class TelegramListener:
         cur = self._prefs_full()
         cur.update(changes)
         return write_prefs(self.cfg.prefs_path, sensitivity=cur["sensitivity"], muted=cur["muted"],
-                           overrides=cur["overrides"], disabled=cur["disabled"])
+                           overrides=cur["overrides"], disabled=cur["disabled"],
+                           confluence=cur["confluence"], cadence=cur["cadence"])
+
+    def _digest_text(self) -> str:
+        """Show the latest autonomous news digest (the cached copy the monitor keeps)."""
+        import json
+        try:
+            with open(self.cfg.news_digest_path) as f:
+                d = json.load(f)
+        except Exception:  # noqa: BLE001
+            return ("📰 no autonomous digest yet — I read the news every "
+                    f"{self.cfg.news_digest_hours:g}h and keep the latest copy. "
+                    "Ask me `/news` for live headlines now.")
+        tag = "🚨 flagged" if d.get("alert") else "🟢 quiet"
+        body = (d.get("body") or d.get("raw") or "(empty)").strip()
+        return f"📰 *Last news digest* — {tag} · _{d.get('iso', '')}_\n{body}"
 
     def _sensitivity_cmd(self, text: str) -> str:
         from .sensitivity import PRESETS, KEY_ALIAS, SIGNAL_ALIAS, MIN_KEYS, describe
         args = text.split()[1:]
-        fmt = lambda p: describe(p["sensitivity"], p["muted"], p["overrides"], p["disabled"])
+        fmt = lambda p: describe(p["sensitivity"], p["muted"], p["overrides"], p["disabled"],
+                                 p.get("confluence"), p.get("cadence"))
         ok = lambda p: "✅ updated — applies within ~15s\n" + fmt(p)
         if not args:
             return fmt(self._prefs_full())
@@ -363,8 +390,68 @@ class TelegramListener:
         return (f"✅ trigger *#{r['id']}* set: `{metric} {op} {value}` — I'll ping each time it "
                 f"crosses. `/alerts` to list · `/delalert {r['id']}` to remove.")
 
+    # ── the /origins inline-keyboard widget (live, no restart) ──
+    _WIDGET_CMDS = ("/origins", "/panel", "/sources", "/widget", "/controls")
+
+    def _tg_api(self, method: str, payload: dict) -> dict | None:
+        """One raw Bot API call (sendMessage with keyboard, edit, answerCallback). No-op
+        without a token; never raises — Telegram UI must not crash the loop."""
+        if not self.token:
+            return None
+        try:
+            import requests  # lazy
+            r = requests.post(f"https://api.telegram.org/bot{self.token}/{method}",
+                              json=payload, timeout=10)
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            log.warning("telegram %s failed: %s", method, e)
+            return None
+
+    def _send_widget(self, chat: str) -> bool:
+        """Send the interactive /origins panel to ``chat``. Returns False if it couldn't
+        (no token) so the caller can fall back to the text view."""
+        from .origins import keyboard, widget_text
+        prefs = self._prefs_full()
+        res = self._tg_api("sendMessage", {
+            "chat_id": chat, "text": widget_text(prefs), "parse_mode": "Markdown",
+            "disable_web_page_preview": True, "reply_markup": keyboard(prefs)})
+        return bool(res and res.get("ok"))
+
+    def _handle_callback(self, cbq: dict) -> None:
+        """A widget button tap: apply it to prefs, re-render the panel in place, ack."""
+        from .origins import apply_callback, keyboard, widget_text
+        data = cbq.get("data", "")
+        cbid = cbq.get("id")
+        msg = cbq.get("message") or {}
+        chat = str((msg.get("chat") or {}).get("id", ""))
+        mid = msg.get("message_id")
+        if self.chat_ids and chat not in self.chat_ids:
+            self._tg_api("answerCallbackQuery", {"callback_query_id": cbid})
+            return
+        if data == "og:x":                              # close -> drop the keyboard
+            self._tg_api("editMessageReplyMarkup", {"chat_id": chat, "message_id": mid})
+            self._tg_api("answerCallbackQuery", {"callback_query_id": cbid, "text": "closed"})
+            return
+        new, toast = apply_callback(data, self._prefs_full())
+        if new is not None:
+            from .origins import _KEYS
+            self._update_prefs(**{k: new[k] for k in _KEYS})
+        prefs = self._prefs_full()
+        self._tg_api("editMessageText", {
+            "chat_id": chat, "message_id": mid, "text": widget_text(prefs),
+            "parse_mode": "Markdown", "disable_web_page_preview": True,
+            "reply_markup": keyboard(prefs)})
+        self._tg_api("answerCallbackQuery", {"callback_query_id": cbid, "text": toast or ""})
+
     # ── network ──
     def _process_update(self, update: dict) -> None:
+        cbq = update.get("callback_query")
+        if cbq:
+            try:
+                self._handle_callback(cbq)
+            except Exception as e:  # noqa: BLE001 - a widget tap must not kill the poll loop
+                log.warning("callback error: %s", e)
+            return
         msg = update.get("message") or update.get("channel_post") or {}
         chat = str((msg.get("chat") or {}).get("id", ""))
         text = msg.get("text", "")
@@ -372,6 +459,11 @@ class TelegramListener:
             return
         if self.chat_ids and chat not in self.chat_ids:
             log.info("ignoring message from non-allowlisted chat %s", chat)
+            return
+        cmd = text.strip().lower().split(maxsplit=1)[0]
+        if cmd in self._WIDGET_CMDS:                    # send live buttons, not text
+            if not self._send_widget(chat):
+                self.notifier.send(self.handle_text("/origins"))   # text fallback (no token)
             return
         try:
             reply = self.handle_text(text)

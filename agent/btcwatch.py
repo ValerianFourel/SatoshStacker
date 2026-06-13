@@ -74,6 +74,44 @@ def _first_launch_onboarding(notifier, marker_path: str) -> bool:
     return True
 
 
+_UPGRADE_NOTICE = (
+    "🆕 *What changed — quieter, smarter alerts.*\n"
+    "You told me I was pinging too much, so:\n"
+    "• 🧩 *Confluence* — I now ping only when *several* signals are out-of-norm *at once* "
+    "(default ≥2), not on any single one. A lone book-imbalance blip won't bug you.\n"
+    "• ⏱️ *Cadence* — at most about *one ping every 30 min*, and a cluster has to clear "
+    "before it can fire again.\n"
+    "• 📰 *News on my own* — I read the news every ~8h, keep a copy (`/digest`), and only "
+    "ping if I judge it market-moving.\n"
+    "\n"
+    "🛰️ Tune all of it live with `/origins` — tap which signals may ping, set how many must "
+    "agree, the cadence, the preset, or mute. Want the old behaviour back? Set confluence to "
+    "1 in `/origins`. Full guide: `/help`."
+)
+
+
+def _maybe_upgrade_notice(cfg, notifier) -> bool:
+    """One-time 'what changed' message for an EXISTING install when the confluence/cadence
+    behaviour first ships (its default flips alerting materially, so the operator is told).
+    Idempotent via a marker; also bakes the new defaults into the prefs file so it's explicit."""
+    if os.path.exists(cfg.upgrade_marker):
+        return False
+    notifier.send(_UPGRADE_NOTICE)
+    try:
+        from .sensitivity import (DEFAULT_CADENCE_S, DEFAULT_CONFLUENCE, read_prefs,
+                                  write_prefs)
+        p = read_prefs(cfg.prefs_path, default_level=cfg.sensitivity,
+                       default_confluence=cfg.confluence_min, default_cadence=cfg.alert_cadence_s)
+        write_prefs(cfg.prefs_path, confluence=p.get("confluence", DEFAULT_CONFLUENCE),
+                    cadence=p.get("cadence", DEFAULT_CADENCE_S))      # make the active config explicit
+        os.makedirs(os.path.dirname(cfg.upgrade_marker) or ".", exist_ok=True)
+        with open(cfg.upgrade_marker, "w") as f:
+            f.write("notified\n")
+    except Exception as e:  # noqa: BLE001 - a marker/prefs write failure must not crash startup
+        log.warning("could not write upgrade marker: %s", e)
+    return True
+
+
 def _build():
     from .analyst import build_analyst, numeric_summary
     from .config import AnalysisConfig, WatchConfig
@@ -167,7 +205,9 @@ def main(argv: list[str] | None = None) -> int:
 
     notifier.send("🟢 *BTC watch online* — tracking live; I'll ping you on tops, bottoms "
                   "& unusual moves. Type /help any time.")
-    _first_launch_onboarding(notifier, cfg.onboarded_marker)  # one-time, first launch only
+    was_first = _first_launch_onboarding(notifier, cfg.onboarded_marker)  # one-time, first launch
+    if not was_first:                       # existing install -> tell them what changed (once)
+        _maybe_upgrade_notice(cfg, notifier)
 
     if cfg.poll_telegram:
         listener = TelegramListener(

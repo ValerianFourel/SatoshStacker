@@ -139,6 +139,11 @@ class WatchConfig:
     funding_extreme_pct: float = 0.05     # |perp funding %/8h| worth flagging (normal ~0.01)
     oi_spike_pct: float = 8.0             # |open-interest 24h change %| worth flagging
     alert_cooldown_s: int = 1800          # min seconds between alerts of the SAME signal
+    # CONFLUENCE: a proactive ping needs at least this many signals out-of-norm AT ONCE
+    # (1 = old per-signal behaviour; 2+ = only ping when several metrics agree). The whole
+    # cluster pings once, then stays quiet for ``alert_cadence_s`` and until it disperses.
+    confluence_min: int = 2               # default: ≥2 signals must cluster to ping
+    alert_cadence_s: int = 1800           # min seconds between proactive (confluence) pings
     analyst_enabled: bool = True          # call the LLM on events (else numeric-only alert)
     analyst_max_tokens: int = 450
     poll_telegram: bool = True            # run the inbound Q&A listener
@@ -153,6 +158,7 @@ class WatchConfig:
     snapshot_path: str = "state/btc_snapshot.json"
     state_path: str = "state/btc_watch_state.json"  # detector cooldowns survive restarts
     onboarded_marker: str = "state/btc_watch_onboarded"  # one-time onboarding tip guard
+    upgrade_marker: str = "state/btc_watch_confluence_upgrade"  # one-time "what changed" notice guard
     tuned_signals_path: str = "agent/watch_signals.json"  # best top/bottom oscillators (--tune)
     tune_timeframe: str = "1h"      # candle for --tune backtest
     tune_weeks: float = 8.0         # lookback weeks for --tune
@@ -165,6 +171,10 @@ class WatchConfig:
     convo_ttl_s: int = 86_400       # remember exchanges this long (24h)
     convo_max_turns: int = 12       # ...and at most this many recent turns
     user_alerts_path: str = "state/user_alerts.json"  # custom trigger rules
+    # autonomous news read: the analyst reads news every N hours regardless, caches a copy,
+    # and pings ONLY if it decides the news itself is significant (else silent).
+    news_digest_hours: float = 8.0
+    news_digest_path: str = "state/news_digest.json"   # the cached copy of the last read
     data_retention_days: int = 90   # prune any pulled-data files older than this
     fee_pct: float = 0.1            # Binance spot fee per leg, % (0.075 w/ BNB; lower at VIP)
     sensitivity: str = "low"        # anomaly preset: low|normal|high (low = fewest alerts)
@@ -187,6 +197,9 @@ class WatchConfig:
             funding_extreme_pct=_f("WATCH_FUNDING_EXTREME_PCT", 0.05),
             oi_spike_pct=_f("WATCH_OI_SPIKE_PCT", 8.0),
             alert_cooldown_s=_i("WATCH_ALERT_COOLDOWN_S", 1800),
+            confluence_min=_i("WATCH_CONFLUENCE_MIN", 2),
+            alert_cadence_s=_i("WATCH_ALERT_CADENCE_S", 1800),
+            news_digest_hours=_f("WATCH_NEWS_DIGEST_HOURS", 8.0),
             analyst_enabled=_b("WATCH_ANALYST_ENABLED", True),
             poll_telegram=_b("WATCH_POLL_TELEGRAM", True),
             alert_charts=_b("WATCH_ALERT_CHARTS", True),

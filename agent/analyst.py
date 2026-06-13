@@ -176,6 +176,9 @@ class MockAnalyst:
         win = f" [{after or '…'}→{before or '…'}]" if (after or before) else ""
         return f"[mock search: {query[:60]}{win}]"
 
+    def news_digest(self, m: dict) -> str:
+        return "QUIET: [mock] no significant news"
+
 
 class LLMAnalyst:
     """Qwen (OpenAI-compatible) read-only analyst. Fail-safe to numeric summary."""
@@ -311,6 +314,19 @@ class LLMAnalyst:
                    "search_results": results, "state": _features(m)}
         return self._respond(payload, fallback=format_search(query, results),
                              allow_search=False)  # already searched
+
+    def news_digest(self, m: dict) -> str:
+        """Autonomous periodic news read (the analyst decides whether to ping). News is
+        auto-attached; one search round allowed. The reply MUST start with 'ALERT:' (worth
+        pinging) or 'QUIET:' (cache only). Conservative by design; fail-safe to QUIET."""
+        payload = {"task": "news_digest", "state": _features(m), "instruction": (
+            "Read the latest BTC news + sentiment (auto-attached); if useful run ONE search "
+            "for fresh context. Summarize the key developments in <=120 words. Then DECIDE "
+            "whether anything is significant enough to PROACTIVELY alert the operator (who is "
+            "accumulating BTC and bearish on USD price). Begin your `reply` with 'ALERT:' if "
+            "yes, otherwise 'QUIET:'. Be conservative — only ALERT on genuinely market-moving "
+            "news (ETF flows, regulation, macro shocks, large liquidations, hacks).")}
+        return self._respond(payload, fallback="QUIET: news read unavailable")
 
     def pick_indicators(self, m: dict, question: str | None = None) -> list:
         """Ask the LLM which up-to-3 indicators to chart (honouring ``question`` if given)."""
