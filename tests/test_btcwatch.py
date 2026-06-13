@@ -66,19 +66,53 @@ def test_book_metrics_imbalance_sign():
 # ── anomaly detector ──
 def test_peak_fires_once_then_cooldown_then_rearm():
     cfg = WatchConfig()
+    det = AnomalyDetector(cfg)                            # level=None -> raw cfg thresholds
+    peak = make_metrics(pct_from_high_24h=0.0, rsi_14=80.0)
+    assert [s.name for s in det.evaluate(peak, now_ts=0.0)] == ["peak"]
+    assert det.evaluate(peak, now_ts=1.0) == []          # same condition -> disarmed
+    # a single off-the-bar scan must NOT re-arm (hysteresis): clear then re-touch fast = silent
+    det.evaluate(make_metrics(), now_ts=cfg.alert_cooldown_s + 10)
+    assert det.evaluate(peak, now_ts=cfg.alert_cooldown_s + 11) == []
+    # only a SUSTAINED clear (>= rearm_clear_s) re-arms; then past cooldown it fires again
+    base = cfg.alert_cooldown_s + 11
+    det.evaluate(make_metrics(), now_ts=base + 5)                        # clear streak starts
+    det.evaluate(make_metrics(), now_ts=base + cfg.rearm_clear_s + 6)    # clear long enough -> re-arm
+    fired2 = det.evaluate(peak, now_ts=base + cfg.rearm_clear_s + 7)
+    assert [s.name for s in fired2] == ["peak"]
+
+
+def test_hysteresis_parked_at_bar_fires_once():
+    # a reading parked at the bar (active every scan) past cooldown must NOT re-fire
+    cfg = WatchConfig()
     det = AnomalyDetector(cfg)
     peak = make_metrics(pct_from_high_24h=0.0, rsi_14=80.0)
-    fired = det.evaluate(peak, now_ts=0.0)
-    assert [s.name for s in fired] == ["peak"]
-    # same condition immediately -> disarmed, no re-fire
-    assert det.evaluate(peak, now_ts=1.0) == []
-    # condition clears -> re-arms, but still within cooldown -> no fire
-    det.evaluate(make_metrics(), now_ts=2.0)
-    assert det.evaluate(peak, now_ts=3.0) == []
-    # past cooldown AND re-armed -> fires again
-    det.evaluate(make_metrics(), now_ts=cfg.alert_cooldown_s + 10)
-    fired2 = det.evaluate(peak, now_ts=cfg.alert_cooldown_s + 20)
-    assert [s.name for s in fired2] == ["peak"]
+    assert [s.name for s in det.evaluate(peak, now_ts=0.0)] == ["peak"]
+    for t in range(1, 6):
+        det.evaluate(peak, now_ts=cfg.alert_cooldown_s * t)             # still pinned, scans pass
+    assert det._state["peak"]["armed"] is False                        # never re-armed while active
+    # one brief flicker off (< rearm) then back on -> still silent
+    det.evaluate(make_metrics(), now_ts=cfg.alert_cooldown_s * 6)
+    assert det.evaluate(peak, now_ts=cfg.alert_cooldown_s * 6 + 1) == []
+
+
+def test_sensitivity_preset_is_quieter():
+    from agent.sensitivity import resolve
+    assert resolve("low")["fund"] > resolve("high")["fund"]            # stricter bar
+    assert resolve("low")["cooldown"] > resolve("high")["cooldown"]   # longer cooldown
+    # funding 0.06%/8h fires at 'high' (bar 0.05) but NOT at 'low' (bar 0.12)
+    m = make_metrics()
+    m["futures"] = {"funding_rate_pct": 0.06, "funding_annualized_pct": 65.7,
+                    "oi_change_24h_pct": 1.0, "long_short_ratio": 1.0}
+    hi = AnomalyDetector(WatchConfig(), level="high")
+    lo = AnomalyDetector(WatchConfig(), level="low")
+    assert "funding_extreme" in [s.name for s in hi.evaluate(m, now_ts=0.0)]
+    assert "funding_extreme" not in [s.name for s in lo.evaluate(m, now_ts=0.0)]
+
+
+def test_muted_suppresses_all_alerts():
+    det = AnomalyDetector(WatchConfig(), level="high", muted=True)
+    peak = make_metrics(pct_from_high_24h=0.0, rsi_14=80.0)
+    assert det.evaluate(peak, now_ts=0.0) == []                        # muted -> nothing fires
 
 
 def test_volume_spike_and_bottom():
@@ -131,6 +165,8 @@ def test_monitor_run_once_fires_event_and_writes_snapshot(tmp_path):
                       tuned_signals_path=str(tmp_path / "none.json"),  # no tuned -> RSI rule
                       alert_charts=False,                              # hermetic: no chart fetch
                       user_alerts_path=str(tmp_path / "alerts.json"),  # isolated alerts
+                      prefs_path=str(tmp_path / "prefs.json"),         # isolated prefs
+                      sensitivity="high",                              # old loose bars for this craft
                       daily_update_tzs=())                             # no digest in this test
     note = FakeNotifier()
 
@@ -540,6 +576,43 @@ def test_levels_sell_anchored():
     assert _parse_levels_args("where do i buy to keep 1% if i sell at 65000") == (1.0, "sell", 65000.0)
     assert _parse_levels_args("good sell price, want 1%") == (1.0, "sell", None)
     assert _parse_levels_args("reentry price, want 2%") == (2.0, "buy", None)
+
+
+def test_sensitivity_prefs_and_listener_commands(tmp_path):
+    from agent.sensitivity import read_prefs, write_prefs
+    p = str(tmp_path / "prefs.json")
+    assert read_prefs(p, default_level="normal") == {"sensitivity": "normal", "muted": False}
+    write_prefs(p, sensitivity="high")
+    assert read_prefs(p)["sensitivity"] == "high"
+    write_prefs(p, muted=True)
+    assert read_prefs(p) == {"sensitivity": "high", "muted": True}    # mute doesn't clobber level
+    # listener commands drive the same file
+    lis = TelegramListener(WatchConfig(prefs_path=p), token="t", chat_id="42",
+                           analyst=MockAnalyst(), notifier=FakeNotifier(), snapshot_fn=lambda: {})
+    assert "low" in lis.handle_text("/sensitivity low") and read_prefs(p)["sensitivity"] == "low"
+    lis.handle_text("/mute")
+    assert read_prefs(p)["muted"] is True
+    lis.handle_text("/unmute")
+    assert read_prefs(p)["muted"] is False
+    assert "usage" in lis.handle_text("/sensitivity wat").lower()     # bad value -> usage
+    assert read_prefs(p)["sensitivity"] == "low"                      # ...and no change
+
+
+def test_monitor_refreshes_prefs_live(tmp_path):
+    from agent.sensitivity import write_prefs
+    p = str(tmp_path / "prefs.json")
+    cfg = WatchConfig(prefs_path=p, sensitivity="normal", alert_charts=False,
+                      snapshot_path=str(tmp_path / "s.json"), state_path=str(tmp_path / "st.json"),
+                      tuned_signals_path=str(tmp_path / "none.json"), daily_update_tzs=(),
+                      user_alerts_path=str(tmp_path / "a.json"))
+    mon = MarketMonitor(cfg, notifier=FakeNotifier(), analyst=MockAnalyst(),
+                        price_fn=lambda: 1.0, klines_fn=lambda a, b: trend_klines(),
+                        book_fn=lambda: {}, ticker_fn=lambda: None, funding_fn=lambda: None,
+                        clock=lambda: 100.0)
+    assert mon.detector.level == "normal" and mon.detector.muted is False  # seeded from cfg
+    write_prefs(p, sensitivity="low", muted=True)
+    mon._refresh_prefs()
+    assert mon.detector.level == "low" and mon.detector.muted is True      # picked up live
 
 
 def test_onchain_text_status():

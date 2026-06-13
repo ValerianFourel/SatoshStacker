@@ -35,6 +35,7 @@ _HELP = (
     "`/alert <metric> <op> <value>` — custom trigger, e.g. `/alert rsi > 70` "
     "(or _ping me when rsi above 70_) · `/alerts` · `/delalert <id>`\n"
     "`/search <query>` — search the web, read the top articles, summarize\n"
+    "`/sensitivity [low|normal|high]` — how easily I alert (low = fewest) · `/mute` · `/unmute`\n"
     "`/notes` — list scratch files · `/get <file>` — read one\n"
     "`/help` — this message\n"
     "\n"
@@ -206,6 +207,24 @@ class TelegramListener:
         if low in ("/onchain", "/mvrv", "/sopr", "/nupl"):
             from .onchain import onchain_text
             return onchain_text((snap or {}).get("onchain") or {})
+        if low.split(" ", 1)[0] in ("/sensitivity", "/sens"):
+            from .sensitivity import describe, PRESETS
+            arg = low.split(" ", 1)[1].strip() if " " in low else ""
+            if arg and arg not in PRESETS:
+                return ("usage: `/sensitivity low|normal|high`  (low = fewest alerts)\n\n"
+                        + describe(*self._prefs()))
+            if arg:
+                lvl, muted = self._set_prefs(sensitivity=arg)
+                return "✅ updated — applies within ~15s\n" + describe(lvl, muted)
+            return describe(*self._prefs())
+        if low in ("/mute", "/silence"):
+            self._set_prefs(muted=True)
+            return ("🔇 *Muted* — no proactive alerts. Your Q&A and the daily digest still "
+                    "work. `/unmute` to resume.")
+        if low == "/unmute":
+            lvl, muted = self._set_prefs(muted=False)
+            from .sensitivity import describe
+            return "🔔 *Unmuted.*\n" + describe(lvl, muted)
         if low == "/news":
             from .websearch import news_line
             return news_line(self.news_fn()) if self.news_fn else "news disabled"
@@ -285,6 +304,21 @@ class TelegramListener:
                 self.notifier.send_photo(png, cap)
                 sent += 1
         return sent
+
+    def _prefs(self):
+        from .sensitivity import read_prefs
+        p = read_prefs(self.cfg.prefs_path, default_level=self.cfg.sensitivity)
+        return p["sensitivity"], p["muted"]
+
+    def _set_prefs(self, **changes):
+        """Read current prefs (cfg default for a fresh file), apply changes, write both
+        fields so neither clobbers the other. The monitor picks it up next scan."""
+        from .sensitivity import write_prefs
+        lvl, muted = self._prefs()
+        cur = {"sensitivity": lvl, "muted": muted}
+        cur.update(changes)
+        p = write_prefs(self.cfg.prefs_path, sensitivity=cur["sensitivity"], muted=cur["muted"])
+        return p["sensitivity"], p["muted"]
 
     def _add_alert(self, spec: str, snap) -> str:
         from .alerts import SUPPORTED, parse_rule, resolve_metric

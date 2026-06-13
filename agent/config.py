@@ -167,6 +167,9 @@ class WatchConfig:
     user_alerts_path: str = "state/user_alerts.json"  # custom trigger rules
     data_retention_days: int = 90   # prune any pulled-data files older than this
     fee_pct: float = 0.1            # Binance spot fee per leg, % (0.075 w/ BNB; lower at VIP)
+    sensitivity: str = "low"        # anomaly preset: low|normal|high (low = fewest alerts)
+    rearm_clear_s: int = 600        # a signal re-arms only after this long clear of its bar
+    prefs_path: str = "state/watch_prefs.json"  # live sensitivity/mute the user can change
 
     @staticmethod
     def from_env() -> "WatchConfig":
@@ -203,6 +206,8 @@ class WatchConfig:
             convo_ttl_s=_i("WATCH_CONVO_TTL_S", 86_400),
             data_retention_days=_i("WATCH_DATA_RETENTION_DAYS", 90),
             fee_pct=_f("WATCH_FEE_PCT", 0.1),
+            sensitivity=os.getenv("WATCH_SENSITIVITY", "low").lower(),
+            rearm_clear_s=_i("WATCH_REARM_CLEAR_S", 600),
         )
 
 

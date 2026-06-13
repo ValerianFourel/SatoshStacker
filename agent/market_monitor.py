@@ -254,7 +254,9 @@ class Signal:
 @dataclass
 class AnomalyDetector:
     cfg: WatchConfig
-    # per-signal state: {"last_fired": ts, "armed": bool}
+    level: "str | None" = None     # None -> raw cfg thresholds (tests); else a preset name
+    muted: bool = False            # True -> no proactive alerts at all
+    # per-signal state: {"last_fired": ts, "armed": bool, "clear_since": ts|None}
     _state: dict = field(default_factory=dict)
 
     def load_state(self, d: dict) -> None:
@@ -264,12 +266,24 @@ class AnomalyDetector:
     def dump_state(self) -> dict:
         return self._state
 
+    def _thr(self) -> dict:
+        """Active threshold set: a sensitivity preset when ``level`` is set, else the raw
+        cfg fields (keeps unit tests deterministic)."""
+        if self.level:
+            from .sensitivity import resolve
+            return resolve(self.level)
+        c = self.cfg
+        return {"rsi_ob": c.rsi_overbought, "rsi_os": c.rsi_oversold, "vol_z": c.vol_z_threshold,
+                "ret_z": c.ret_z_threshold, "near": c.near_extreme_pct, "imb": c.imbalance_threshold,
+                "fund": c.funding_extreme_pct, "oi": c.oi_spike_pct, "ls_long": 2.0, "ls_short": 0.6,
+                "cooldown": c.alert_cooldown_s, "rearm": c.rearm_clear_s}
+
     def _conditions(self, m: dict) -> list[Signal]:
         tech, vol, book = m["technicals"], m["volume"], m.get("order_book", {})
-        c = self.cfg
+        c, T = self.cfg, self._thr()
         out: list[Signal] = []
-        near_high = tech["pct_from_high_24h"] >= -c.near_extreme_pct
-        near_low = tech["pct_from_low_24h"] <= c.near_extreme_pct
+        near_high = tech["pct_from_high_24h"] >= -T["near"]
+        near_low = tech["pct_from_low_24h"] <= T["near"]
         from .signal_tuner import _pretty, _score
         tuned = m.get("tuned", {})
         tp, bt = tuned.get("top"), tuned.get("bottom")
@@ -279,7 +293,7 @@ class AnomalyDetector:
                 out.append(Signal("peak", "peak",
                     f"{_pretty(tp['name'])} at {tp['value']} (fires ≥{tp['threshold']}) "
                     f"— tuned top-caller, score {_score(tp.get('auc'))}"))
-        elif near_high and tech["rsi_14"] >= c.rsi_overbought:
+        elif near_high and tech["rsi_14"] >= T["rsi_ob"]:
             out.append(Signal("peak", "peak",
                 f"at 24h-high, RSI {tech['rsi_14']} overbought "
                 f"({tech['pct_from_high_24h']:+.2f}% from high)"))
@@ -289,62 +303,74 @@ class AnomalyDetector:
                 out.append(Signal("bottom", "bottom",
                     f"{_pretty(bt['name'])} at {bt['value']} (fires ≤{bt['threshold']}) "
                     f"— tuned bottom-caller, score {_score(bt.get('auc'))}"))
-        elif near_low and tech["rsi_14"] <= c.rsi_oversold:
+        elif near_low and tech["rsi_14"] <= T["rsi_os"]:
             out.append(Signal("bottom", "bottom",
                 f"at 24h-low, RSI {tech['rsi_14']} oversold "
                 f"({tech['pct_from_low_24h']:+.2f}% from low)"))
-        if vol["z"] >= c.vol_z_threshold:
+        if vol["z"] >= T["vol_z"]:
             out.append(Signal("volume_spike", "spike",
                 f"volume {vol['surge_x']}x normal (z={vol['z']})"))
-        if tech["ret_z"] >= c.ret_z_threshold:
+        if tech["ret_z"] >= T["ret_z"]:
             out.append(Signal("price_spike_up", "spike",
                 f"fast up-move {tech['ret_1m_pct']:+.2f}%/1m (z={tech['ret_z']})"))
-        if tech["ret_z"] <= -c.ret_z_threshold:
+        if tech["ret_z"] <= -T["ret_z"]:
             out.append(Signal("price_spike_down", "spike",
                 f"fast down-move {tech['ret_1m_pct']:+.2f}%/1m (z={tech['ret_z']})"))
         if book.get("ok"):
             band = book["bands"].get(str(c.depth_bands_pct[1]), {})
             imb = band.get("imbalance", 0.0)
-            if abs(imb) >= c.imbalance_threshold:
+            if abs(imb) >= T["imb"]:
                 side = "bid-heavy (support)" if imb > 0 else "ask-heavy (resistance)"
                 out.append(Signal("book_imbalance", "microstructure",
                     f"order book {side}, imbalance {imb:+.2f}"))
         fut = m.get("futures", {})
         fr = fut.get("funding_rate_pct")
-        if fr is not None and abs(fr) >= c.funding_extreme_pct:
+        if fr is not None and abs(fr) >= T["fund"]:
             who = "crowded longs paying" if fr > 0 else "crowded shorts paying"
             out.append(Signal("funding_extreme", "spike",
                 f"funding {fr:+.4f}%/8h ({fut.get('funding_annualized_pct')}%/yr) — {who}"))
         oic = fut.get("oi_change_24h_pct")
-        if oic is not None and abs(oic) >= c.oi_spike_pct:
+        if oic is not None and abs(oic) >= T["oi"]:
             d = ("leverage building" if oic > 0 else "deleveraging / liquidations")
             out.append(Signal("oi_spike", "spike",
                 f"open interest {oic:+.1f}% in 24h — {d}"))
         lsr = fut.get("long_short_ratio")
-        if lsr is not None and (lsr >= 2.0 or lsr <= 0.6):
-            crowd = "crowded LONG (retail)" if lsr >= 2.0 else "crowded SHORT (retail)"
+        if lsr is not None and (lsr >= T["ls_long"] or lsr <= T["ls_short"]):
+            crowd = "crowded LONG (retail)" if lsr >= T["ls_long"] else "crowded SHORT (retail)"
             out.append(Signal("long_short_extreme", "spike",
                 f"long/short ratio {lsr:.2f} — {crowd}"))
         return out
 
     def evaluate(self, m: dict, *, now_ts: float) -> list[Signal]:
-        """Return signals that should fire NOW. A signal fires only if it is armed
-        (was clear since the last fire) AND its cooldown has elapsed; firing disarms
-        it, and it re-arms once the condition clears. One episode = one alert."""
+        """Signals that should fire NOW. A signal fires only if it is armed AND its
+        cooldown has elapsed; firing disarms it. It re-arms ONLY after its reading has
+        been clear of the bar for ``rearm`` seconds straight — so a value hovering at the
+        threshold (one flickering scan off) does NOT re-fire. One episode = one alert."""
+        if self.muted:
+            return []
+        T = self._thr()
+        cooldown, rearm = T["cooldown"], T["rearm"]
         active = {s.name: s for s in self._conditions(m)}
         fired: list[Signal] = []
-        # re-arm any signal whose condition is no longer present
+        # hysteresis re-arm: require a *sustained* clear streak, not a single off-scan
         for name, st in self._state.items():
-            if name not in active:
-                st["armed"] = True
+            if name in active:
+                st["clear_since"] = None                       # back on the bar -> reset streak
+            else:
+                if st.get("clear_since") is None:
+                    st["clear_since"] = now_ts                 # streak starts
+                elif now_ts - st["clear_since"] >= rearm:
+                    st["armed"] = True                         # clear long enough -> re-arm
         for name, sig in active.items():
-            st = self._state.setdefault(name, {"last_fired": None, "armed": True})
+            st = self._state.setdefault(name,
+                                        {"last_fired": None, "armed": True, "clear_since": None})
             lf = st.get("last_fired")
-            cooled = lf is None or (now_ts - lf) >= self.cfg.alert_cooldown_s
+            cooled = lf is None or (now_ts - lf) >= cooldown
             if st.get("armed", True) and cooled:
                 fired.append(sig)
                 st["last_fired"] = now_ts
                 st["armed"] = False
+                st["clear_since"] = None
         return fired
 
 
@@ -388,6 +414,8 @@ class MarketMonitor:
         self.ticker_fn = ticker_fn or (lambda: exchange.public_ticker_24h(cfg.symbol))
         self.funding_fn = funding_fn or (lambda: exchange.public_funding_oi(cfg.symbol))
         self.detector = AnomalyDetector(cfg)
+        self._prefs_mtime: float = -2.0
+        self._refresh_prefs(force=True)        # sets detector.level / .muted from prefs file
         self._mtf_cache: dict = {}
         self._mtf_ts: float = 0.0
         self._oc_cache: dict = {}
@@ -395,6 +423,21 @@ class MarketMonitor:
         from .alerts import AlertStore
         self.alerts = AlertStore(cfg.user_alerts_path)
         self._load_state()
+
+    def _refresh_prefs(self, *, force: bool = False) -> None:
+        """Pick up live sensitivity / mute changes from the prefs file (mtime-gated, cheap)."""
+        from .sensitivity import read_prefs
+        path = self.cfg.prefs_path
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            mt = -1.0
+        if not force and mt == self._prefs_mtime:
+            return
+        self._prefs_mtime = mt
+        p = read_prefs(path, default_level=self.cfg.sensitivity)
+        self.detector.level = p["sensitivity"]
+        self.detector.muted = p["muted"]
 
     def _check_user_alerts(self, m: dict) -> None:
         """Evaluate user-defined trigger rules against the live snapshot; ping on fire."""
@@ -505,6 +548,7 @@ class MarketMonitor:
 
     def run_once(self) -> dict:
         now = self.clock()
+        self._refresh_prefs()        # apply any live /sensitivity or /mute change
         price = self.price_fn()
         fast = self.klines_fn(self.cfg.kline_tf, self.cfg.kline_limit)
         trend = self.klines_fn(self.cfg.trend_tf, self.cfg.trend_limit)
