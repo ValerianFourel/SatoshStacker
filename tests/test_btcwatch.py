@@ -237,14 +237,14 @@ def test_listener_poll_startup_does_not_crash():
 
 
 def test_conversation_memory_ttl_and_cap(tmp_path):
-    from agent.convo import Conversation
+    from agent.memory import Memory
     t = {"now": 1000.0}
-    c = Conversation(str(tmp_path / "c.json"), ttl_s=100, max_turns=4, clock=lambda: t["now"])
-    c.add("user", "q1")
-    c.add("assistant", "a1")
-    assert [x["text"] for x in c.recent()] == ["q1", "a1"]
+    c = Memory(str(tmp_path / "m.jsonl"), ttl_s=100, max_chat_turns=4, clock=lambda: t["now"])
+    c.add_chat("user", "q1")
+    c.add_chat("assistant", "a1")
+    assert [x["text"] for x in c.recent_chat()] == ["q1", "a1"]
     t["now"] = 1200.0                              # past the 100s TTL
-    assert c.recent() == []
+    assert c.recent_chat() == []                   # auto-erased
 
 
 def test_natural_language_chart_request(monkeypatch):
@@ -1001,3 +1001,96 @@ def test_upgrade_notice_fires_once_and_bakes_prefs(tmp_path):
     assert baked["confluence"] == 2 and baked["sensitivity"] == "high"  # defaults baked, prefs kept
     assert _maybe_upgrade_notice(cfg, note) is False               # restart -> no resend
     assert len(note.sent) == 1
+
+
+# ── multi-day jsonl memory (conversation + searches) ──
+def test_memory_jsonl_chat_search_and_clear(tmp_path):
+    from agent.memory import Memory
+    clk = {"t": 1_000_000.0}
+    m = Memory(str(tmp_path / "m.jsonl"), ttl_s=7 * 86400, clock=lambda: clk["t"])
+    m.add_chat("user", "is this a top?")
+    m.add_chat("assistant", "looks oversold")
+    m.add_search("etf flows", summary="net outflows", after="2026-06-01")
+    assert [x["text"] for x in m.recent_chat()] == ["is this a top?", "looks oversold"]
+    s = m.recent_searches()
+    assert len(s) == 1 and s[0]["query"] == "etf flows" and s[0]["after"] == "2026-06-01"
+    lines = [l for l in open(m.path).read().splitlines() if l.strip()]   # real jsonl
+    assert len(lines) == 3 and all(json.loads(l)["kind"] in ("chat", "search") for l in lines)
+    st = m.stats()
+    assert st["chats"] == 2 and st["searches"] == 1
+    assert m.clear("all") == 3
+    assert m.recent_chat() == [] and m.recent_searches() == []
+
+
+def test_memory_clear_old_keeps_today(tmp_path):
+    import calendar
+    from agent.memory import Memory
+    today = calendar.timegm((2026, 6, 13, 12, 0, 0, 0, 0, 0))
+    clk = {"t": today - 86400}                       # yesterday
+    m = Memory(str(tmp_path / "m.jsonl"), ttl_s=30 * 86400, clock=lambda: clk["t"])
+    m.add_chat("user", "old msg")
+    clk["t"] = today
+    m.add_chat("user", "new msg")
+    assert m.clear("old") == 1                        # only yesterday's dropped
+    assert [x["text"] for x in m.recent_chat()] == ["new msg"]
+
+
+def test_memory_auto_erase_and_compacts(tmp_path):
+    from agent.memory import Memory
+    clk = {"t": 1000.0}
+    m = Memory(str(tmp_path / "m.jsonl"), ttl_s=100, clock=lambda: clk["t"])
+    m.add_chat("user", "stale")
+    clk["t"] = 1050.0
+    m.add_chat("user", "fresh")
+    clk["t"] = 1120.0                                 # 'stale' 120s old (>100), 'fresh' 70s (<100)
+    assert [x["text"] for x in m.recent_chat()] == ["fresh"]
+    lines = [l for l in open(m.path).read().splitlines() if l.strip()]
+    assert len(lines) == 1 and json.loads(lines[0])["text"] == "fresh"   # file self-compacted
+
+
+def test_listener_memory_clear_and_search_recording(tmp_path):
+    mp = str(tmp_path / "m.jsonl")
+    snap = {"price": 1, "technicals": {}, "volume": {}, "order_book": {}, "time": {}}
+    lis = TelegramListener(WatchConfig(memory_path=mp), token="t", chat_id="42",
+                           analyst=MockAnalyst(), notifier=FakeNotifier(), snapshot_fn=lambda: snap)
+    assert "mock search" in lis.handle_text("/search etf flows after:2026-06-01")
+    s = lis.memory.recent_searches()
+    assert len(s) == 1 and "etf flows" in s[0]["query"] and s[0]["after"] == "2026-06-01"
+    lis.handle_text("is this a top?")                            # plain Q -> records chat turns
+    assert any(x["text"] == "is this a top?" for x in lis.memory.recent_chat())
+    assert len(lis.memory.recent_searches()) == 1                # answer() reset last_search; no dup
+    assert "Memory" in lis.handle_text("/memory")
+    assert "cleared" in lis.handle_text("/clear").lower()
+    assert lis.memory.recent_chat() == [] and lis.memory.recent_searches() == []
+
+
+def test_listener_always_answers_even_on_handler_error():
+    class _Boom(MockAnalyst):
+        def answer(self, *a, **k):
+            raise RuntimeError("llm exploded")
+    note = FakeNotifier()
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=_Boom(),
+                           notifier=note, snapshot_fn=lambda: {"price": 1, "technicals": {},
+                           "volume": {}, "order_book": {}, "time": {}})
+    lis._process_update({"message": {"chat": {"id": 42}, "text": "give me an update"}})
+    assert len(note.sent) == 1 and "snag" in note.sent[0].lower()   # never silently dropped
+
+
+def test_memory_clear_reports_failure_not_false_success(tmp_path, monkeypatch):
+    from agent.memory import Memory
+    m = Memory(str(tmp_path / "m.jsonl"))
+    m.add_chat("user", "secret note")
+    monkeypatch.setattr("os.replace", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only fs")))
+    assert m.clear("all") == -1                       # rewrite failed -> honest sentinel, not a lie
+    monkeypatch.undo()
+    assert [x["text"] for x in m.recent_chat()] == ["secret note"]   # data really did survive
+
+
+def test_listener_clear_failure_message(tmp_path, monkeypatch):
+    lis = TelegramListener(WatchConfig(memory_path=str(tmp_path / "m.jsonl")), token="t",
+                           chat_id="42", analyst=MockAnalyst(), notifier=FakeNotifier(),
+                           snapshot_fn=lambda: {"price": 1})
+    lis.memory.add_chat("user", "hi")
+    monkeypatch.setattr("os.replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    out = lis.handle_text("/clear")
+    assert "couldn't clear" in out.lower() and "nothing was deleted" in out.lower()

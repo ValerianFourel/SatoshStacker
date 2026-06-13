@@ -23,6 +23,10 @@ _HELP = (
     "most about once every 30 min — with an LLM read. I also read the news every ~8h on my "
     "own, keep a copy (`/digest`), and only ping if I judge it market-moving.\n"
     "\n"
+    "💬 *You're the boss:* I *always* answer your messages — sensitivity / `balanced` / mute only "
+    "affect my *proactive* pings, never my replies. I remember our chats & searches across days "
+    "(~1 week) for context; `/clear` wipes that, `/clear old` keeps just today.\n"
+    "\n"
     "*Commands*\n"
     "`/origins` — 🛰️ control panel: tap which signals may ping, how many must agree, the "
     "cadence, the preset, mute — all live\n"
@@ -41,6 +45,7 @@ _HELP = (
     "`/search <query>` — search the web, read the top articles, summarize\n"
     "`/sensitivity [low|normal|high]` — how easily I alert (low = fewest) · `/mute` · `/unmute`\n"
     "`/notes` — list scratch files · `/get <file>` — read one\n"
+    "`/memory` — what I remember · `/clear` — forget it (`/clear old` = keep today)\n"
     "`/help` — this message\n"
     "\n"
     "*Or just ask in plain words:*\n"
@@ -172,9 +177,9 @@ class TelegramListener:
         self.scratch = scratch
         self.news_fn = news_fn               # () -> dict | None  (BTC news + Fear&Greed)
         from .alerts import AlertStore
-        from .convo import Conversation
-        self.convo = Conversation(cfg.convo_path, ttl_s=cfg.convo_ttl_s,
-                                  max_turns=cfg.convo_max_turns)
+        from .memory import Memory
+        self.memory = Memory(cfg.memory_path, ttl_s=cfg.memory_ttl_s,
+                             max_chat_turns=cfg.memory_max_turns)
         self.alerts = AlertStore(cfg.user_alerts_path)
         self._offset = 0
 
@@ -232,7 +237,23 @@ class TelegramListener:
             return news_line(self.news_fn()) if self.news_fn else "news disabled"
         if low.startswith("/search "):
             q, after, before = _parse_search_dates(text[8:].strip())
-            return self.analyst.search(q, snap, after=after, before=before)
+            reply = self.analyst.search(q, snap, after=after, before=before)
+            self.memory.add_search(q, summary=reply[:300], after=after, before=before)
+            return reply
+        if low.split(" ", 1)[0] in ("/clear", "/forget"):
+            scope = "old" if "old" in low or "previous" in low or "days" in low else "all"
+            n = self.memory.clear(scope)
+            if n < 0:                               # rewrite failed -> don't claim a false wipe
+                return "⚠️ couldn't clear memory (storage error) — nothing was deleted. Try again."
+            kept = "kept today's" if scope == "old" else "wiped all"
+            return (f"🧹 *Memory cleared* — {kept} ({n} record{'s' if n != 1 else ''} dropped). "
+                    "I forget conversations & searches automatically after a week anyway.")
+        if low in ("/memory", "/mem"):
+            s = self.memory.stats()
+            return (f"🧠 *Memory* — {s['chats']} chat turn(s) · {s['searches']} search(es), "
+                    f"auto-erased after {s['ttl_days']:g}d"
+                    + (f" · since {s['oldest'][:10]}" if s['oldest'] else "")
+                    + ".\n`/clear` wipes it · `/clear old` keeps just today.")
         if low == "/notes":
             files = self.scratch.list() if self.scratch else []
             return "scratch files:\n" + ("\n".join(files) if files else "(none)")
@@ -281,10 +302,15 @@ class TelegramListener:
         if "show me" in low or any(w in low for w in ("chart", "plot", "graph", "draw")):
             self._send_charts(snap, question=text)
             return ""
-        # conversational answer, with 24h short-term memory for follow-ups
-        reply = self.analyst.answer(text, snap, history=self.convo.recent())
-        self.convo.add("user", text)
-        self.convo.add("assistant", reply)
+        # conversational answer, with multi-day memory (conversation + recent searches)
+        reply = self.analyst.answer(text, snap, history=self.memory.recent_chat(),
+                                    searches=self.memory.recent_searches())
+        self.memory.add_chat("user", text)
+        self.memory.add_chat("assistant", reply)
+        srch = getattr(self.analyst, "last_search", None)   # remember any autonomous search it ran
+        if srch and srch.get("query"):
+            self.memory.add_search(srch["query"], summary=reply[:300],
+                                   after=srch.get("after"), before=srch.get("before"))
         return reply
 
     def _send_charts(self, snap, question=None) -> int:
@@ -467,10 +493,11 @@ class TelegramListener:
             return
         try:
             reply = self.handle_text(text)
-            if reply:                       # /chart sends a photo itself and returns ""
-                self.notifier.send(reply)
-        except Exception as e:  # noqa: BLE001 - a bad question must not kill the loop
+        except Exception as e:  # noqa: BLE001 - a bad question must not kill the loop OR go unanswered
             log.warning("handler error: %s", e)
+            reply = "⚠️ I hit a snag on that one — try again, or send `/help`."
+        if reply:                           # /chart etc. send a photo themselves and return ""
+            self.notifier.send(reply)
 
     def poll(self, stop) -> None:
         """Long-poll getUpdates until ``stop`` is set. No-op if no token."""

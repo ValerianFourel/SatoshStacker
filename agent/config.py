@@ -166,10 +166,14 @@ class WatchConfig:
     # daily digest: send a briefing at this local hour in each of these zones
     daily_update_hour: int = 9
     daily_update_tzs: tuple = ("America/New_York", "Asia/Seoul")
-    # short-term conversation memory (24h temp file)
+    # short-term conversation memory (24h temp file) — legacy; superseded by the jsonl memory
     convo_path: str = "state/conversation.json"
     convo_ttl_s: int = 86_400       # remember exchanges this long (24h)
     convo_max_turns: int = 12       # ...and at most this many recent turns
+    # multi-day rolling memory (jsonl transcript): conversation + searches, auto-erased past ttl
+    memory_path: str = "state/memory.jsonl"
+    memory_ttl_s: int = 7 * 86_400  # keep ~1 week, then auto-erase (clear with /clear)
+    memory_max_turns: int = 24      # most recent chat turns fed back to the LLM
     user_alerts_path: str = "state/user_alerts.json"  # custom trigger rules
     # autonomous news read: the analyst reads news every N hours regardless, caches a copy,
     # and pings ONLY if it decides the news itself is significant (else silent).
@@ -217,6 +221,7 @@ class WatchConfig:
             daily_update_tzs=tuple(z.strip() for z in os.getenv(
                 "WATCH_DAILY_TZS", "America/New_York,Asia/Seoul").split(",") if z.strip()),
             convo_ttl_s=_i("WATCH_CONVO_TTL_S", 86_400),
+            memory_ttl_s=_i("WATCH_MEMORY_TTL_S", 7 * 86_400),
             data_retention_days=_i("WATCH_DATA_RETENTION_DAYS", 90),
             fee_pct=_f("WATCH_FEE_PCT", 0.1),
             sensitivity=os.getenv("WATCH_SENSITIVITY", "low").lower(),

@@ -35,6 +35,8 @@ _SYSTEM = (
     "• `tuned_signals` — the backtest-best top/bottom indicators and their current readings.\n"
     "• `stacking_levels` — structural reentry (buy) & sell zones from support/resistance.\n"
     "• `news.sentiment` — Fear&Greed for day/week/month; `headlines` are recent.\n"
+    "• `recent_conversation` / `recent_searches` — your exchanges with the operator and the "
+    "web searches you ran over the past days; use them for continuity (refer back when relevant).\n"
     "ORDER OF PRIORITY: read PRICE, CANDLES, order book, funding & OI FIRST; treat news "
     "& sentiment as SECONDARY context, not the lead. Say which timeframe a reading is on. "
     "Explain plainly what is happening RIGHT NOW (likely top/bottom, exhaustion, breakout, "
@@ -161,6 +163,7 @@ class MockAnalyst:
     def __init__(self, scratch: Scratch | None = None) -> None:
         self.scratch = scratch
         self.last_plot: list = []
+        self.last_search: dict | None = None
 
     def pick_indicators(self, m: dict, question: str | None = None) -> list:
         return []
@@ -169,10 +172,12 @@ class MockAnalyst:
         names = ", ".join(getattr(s, "name", str(s)) for s in signals)
         return f"[mock] {names}\n{numeric_summary(m)}"
 
-    def answer(self, question: str, m: dict, history=None) -> str:
+    def answer(self, question: str, m: dict, history=None, searches=None) -> str:
+        self.last_search = None       # mirror LLMAnalyst._respond (no autonomous search ran)
         return f"[mock answer to: {question[:60]}]\n{numeric_summary(m)}"
 
     def search(self, query: str, m: dict, after=None, before=None) -> str:
+        self.last_search = {"query": query, "after": after, "before": before}
         win = f" [{after or '…'}→{before or '…'}]" if (after or before) else ""
         return f"[mock search: {query[:60]}{win}]"
 
@@ -193,6 +198,7 @@ class LLMAnalyst:
         self.news_fn = news_fn        # () -> dict | None  (cached BTC news + Fear&Greed)
         self.search_fn = search_fn    # (query) -> list[dict]  (web results)
         self.last_plot: list = []     # indicators the LLM chose to chart on the last call
+        self.last_search: dict | None = None  # the web search (if any) the last call ran
 
     @staticmethod
     def _valid_plot_spec(plot) -> list:
@@ -235,6 +241,7 @@ class LLMAnalyst:
             return None
 
     def _respond(self, payload: dict, fallback: str, *, allow_search: bool = True) -> str:
+        self.last_search = None
         if not self._api_key:
             return fallback
         import datetime
@@ -262,6 +269,7 @@ class LLMAnalyst:
             except Exception:  # noqa: BLE001
                 results = []
             tag = q + (f" [{after or '…'}→{before or '…'}]" if (after or before) else "")
+            self.last_search = {"query": q, "after": after, "before": before}
             d2 = self._llm({**p, "search_query": q, "search_after": after,
                             "search_before": before, "search_results": results})
             if d2 is not None:
@@ -295,9 +303,11 @@ class LLMAnalyst:
         payload = {"task": "event_read", "triggers": triggers, "state": _features(m)}
         return self._respond(payload, fallback=numeric_summary(m))
 
-    def answer(self, question: str, m: dict, history=None) -> str:
+    def answer(self, question: str, m: dict, history=None, searches=None) -> str:
         payload = {"task": "answer_question", "question": question[:500],
-                   "recent_conversation": (history or [])[-8:], "state": _features(m)}
+                   "recent_conversation": (history or [])[-12:], "state": _features(m)}
+        if searches:
+            payload["recent_searches"] = searches[-10:]   # what I looked up over recent days
         return self._respond(payload, fallback=numeric_summary(m))
 
     def search(self, query: str, m: dict, after=None, before=None) -> str:
@@ -312,8 +322,10 @@ class LLMAnalyst:
         payload = {"task": "web_search_synthesis", "query": query[:300],
                    "search_after": after, "search_before": before,
                    "search_results": results, "state": _features(m)}
-        return self._respond(payload, fallback=format_search(query, results),
-                             allow_search=False)  # already searched
+        out = self._respond(payload, fallback=format_search(query, results),
+                            allow_search=False)  # already searched
+        self.last_search = {"query": query, "after": after, "before": before}
+        return out
 
     def news_digest(self, m: dict) -> str:
         """Autonomous periodic news read (the analyst decides whether to ping). News is

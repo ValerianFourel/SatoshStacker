@@ -131,11 +131,14 @@ def _build():
                     q, max_results=cfg.search_max_results, fetch_n=cfg.fetch_articles,
                     max_chars=cfg.article_max_chars, after=after, before=before))
                  if cfg.web_search_enabled else None)
-    analyst = build_analyst(acfg, api_key, scratch, max_tokens=cfg.analyst_max_tokens,
-                            news_fn=news_fn, search_fn=search_fn)
+    # SEPARATE analyst per thread: the monitor thread and the listener thread each get their
+    # own instance so per-call scratch state (last_plot, last_search) can't race across threads.
+    def _mk_analyst():
+        return build_analyst(acfg, api_key, scratch, max_tokens=cfg.analyst_max_tokens,
+                             news_fn=news_fn, search_fn=search_fn)
     notifier = Notifier(chat_id=_chat_allowlist())   # broadcast to operator + shared users
-    monitor = MarketMonitor(cfg, notifier=notifier, analyst=analyst)
-    return cfg, monitor, analyst, notifier, scratch, news_fn, numeric_summary
+    monitor = MarketMonitor(cfg, notifier=notifier, analyst=_mk_analyst())
+    return cfg, monitor, _mk_analyst(), notifier, scratch, news_fn, numeric_summary
 
 
 def main(argv: list[str] | None = None) -> int:
