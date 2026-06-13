@@ -8,11 +8,15 @@ watch bot is read-only and never places orders.
 from __future__ import annotations
 
 
-def suggest_levels(m: dict, *, target_pct: float | None = None,
-                   fee_pct: float = 0.1) -> dict | None:
+def suggest_levels(m: dict, *, target_pct: float | None = None, fee_pct: float = 0.1,
+                   anchor: str = "buy", anchor_price: float | None = None) -> dict | None:
     """Reentry/sell zones from market structure. If ``target_pct`` is given, also a
     concrete buy/sell pair scaled so the round trip nets ~target% AFTER Binance fees
-    (``fee_pct`` per leg) + the live spread."""
+    (``fee_pct`` per leg) + the live spread.
+
+    ``anchor="buy"`` (default) fixes the buy at the nearest support and solves for the
+    sell; ``anchor="sell"`` fixes the sell at the nearest resistance and solves for the
+    buy. ``anchor_price`` overrides the anchored side with an explicit level."""
     t = m.get("technicals", {})
     b = m.get("order_book", {})
     price = m.get("price")
@@ -44,12 +48,19 @@ def suggest_levels(m: dict, *, target_pct: float | None = None,
         spread_pct = (b.get("spread_bps") or 1.0) / 100.0    # cost of crossing the book
         cost_pct = 2 * fee_pct + spread_pct                  # 2 legs of fee + the spread
         gross_pct = target_pct + cost_pct                    # required buy->sell move
-        buy = reentry_hi or price                            # anchor the buy at nearest support
+        ratio = 1 + gross_pct / 100
+        if anchor == "sell":                                 # fix the sell, solve for the buy
+            sell = anchor_price or sell_lo or price * 1.01   # nearest resistance by default
+            buy = sell / ratio
+        else:                                                # fix the buy, solve for the sell
+            buy = anchor_price or reentry_hi or price        # nearest support by default
+            sell = buy * ratio
         out["target"] = {
+            "anchor": "sell" if anchor == "sell" else "buy",
             "want_pct": round(target_pct, 3), "fee_pct": fee_pct,
             "spread_pct": round(spread_pct, 3), "cost_pct": round(cost_pct, 3),
             "gross_pct": round(gross_pct, 3),
-            "buy": round(buy), "sell": round(buy * (1 + gross_pct / 100)),
+            "buy": round(buy), "sell": round(sell),
         }
     return out
 
@@ -58,8 +69,10 @@ def _named(d: dict) -> str:
     return " · ".join(f"{k.replace('_', ' ')} ${v:,.0f}" for k, v in d.items() if v)
 
 
-def levels_text(m: dict, *, target_pct: float | None = None, fee_pct: float = 0.1) -> str:
-    lv = suggest_levels(m, target_pct=target_pct, fee_pct=fee_pct)
+def levels_text(m: dict, *, target_pct: float | None = None, fee_pct: float = 0.1,
+                anchor: str = "buy", anchor_price: float | None = None) -> str:
+    lv = suggest_levels(m, target_pct=target_pct, fee_pct=fee_pct,
+                        anchor=anchor, anchor_price=anchor_price)
     if not lv:
         return "no snapshot yet — can't compute levels"
     r_lo, r_hi = lv["reentry"]
@@ -73,13 +86,21 @@ def levels_text(m: dict, *, target_pct: float | None = None, fee_pct: float = 0.
     if lv.get("target"):
         tg = lv["target"]
         net = tg["want_pct"]
-        head = (
-            f"🎯 *You want ~{net:g}% net* → here's the pair:\n"
-            f"🟢 *Buy ≤* `${tg['buy']:,.0f}`   🔴 *Sell ≥* `${tg['sell']:,.0f}`\n"
-            f"   move needed `{tg['gross_pct']:g}%` = {net:g}% you keep "
-            f"+ {2 * tg['fee_pct']:g}% fees (2×{tg['fee_pct']:g}%) "
-            f"+ {tg['spread_pct']:g}% spread\n"
-            f"   _set_ `/alert price <= {tg['buy']}` _to get pinged at the buy._\n\n")
+        cost = (f"   move needed `{tg['gross_pct']:g}%` = {net:g}% you keep "
+                f"+ {2 * tg['fee_pct']:g}% fees (2×{tg['fee_pct']:g}%) "
+                f"+ {tg['spread_pct']:g}% spread\n")
+        if tg["anchor"] == "sell":              # sell fixed (at resistance / your price)
+            head = (
+                f"🎯 *You want ~{net:g}% net*, anchored on the SELL → here's the pair:\n"
+                f"🔴 *Sell ≥* `${tg['sell']:,.0f}`   🟢 *Buy ≤* `${tg['buy']:,.0f}`\n"
+                + cost +
+                f"   _set_ `/alert price >= {tg['sell']}` _to get pinged at the sell._\n\n")
+        else:                                   # buy fixed (at support / your price)
+            head = (
+                f"🎯 *You want ~{net:g}% net*, anchored on the BUY → here's the pair:\n"
+                f"🟢 *Buy ≤* `${tg['buy']:,.0f}`   🔴 *Sell ≥* `${tg['sell']:,.0f}`\n"
+                + cost +
+                f"   _set_ `/alert price <= {tg['buy']}` _to get pinged at the buy._\n\n")
     return (
         head +
         f"📐 *Structure* — now `${lv['price']:,.0f}`  (ATR ≈ ${lv['atr']:,.0f})\n"

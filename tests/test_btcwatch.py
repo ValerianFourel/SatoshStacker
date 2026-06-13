@@ -514,6 +514,34 @@ def test_levels_text_shows_target_and_parser():
     assert _parse_target_pct("/levels 999", allow_bare=True) is None   # absurd -> ignored
 
 
+def test_levels_sell_anchored():
+    from agent.levels import suggest_levels, levels_text
+    from agent.telegram_listener import _parse_levels_args
+    m = {"price": 60000, "technicals": {"atr_pct": 1.0, "low_24h": 59000, "high_24h": 61000,
+                                        "low_7d": 57000, "high_7d": 63000},
+         "order_book": {"spread_bps": 2.0}}
+    # sell-anchored at nearest resistance: buy = sell / (1+gross)
+    tg = suggest_levels(m, target_pct=1.0, fee_pct=0.1, anchor="sell")["target"]
+    assert tg["anchor"] == "sell" and tg["buy"] < tg["sell"]
+    assert abs(tg["sell"] / tg["buy"] - 1.0122) < 1e-3
+    # explicit sell price overrides the anchor; buy backs out from it
+    tg2 = suggest_levels(m, target_pct=1.0, fee_pct=0.1, anchor="sell", anchor_price=65000)["target"]
+    assert tg2["sell"] == 65000 and abs(tg2["buy"] - 65000 / 1.0122) < 5
+    # text: sell-first + the alert hint flips to >=
+    txt = levels_text(m, target_pct=1.0, anchor="sell")
+    assert "anchored on the SELL" in txt and "price >=" in txt
+    assert "price <=" in levels_text(m, target_pct=1.0, anchor="buy")
+    # parser: command, explicit price, NL, side disambiguation
+    assert _parse_levels_args("/sell 1", default_anchor="sell", allow_bare=True) == (1.0, "sell", None)
+    assert _parse_levels_args("/levels 1", allow_bare=True) == (1.0, "buy", None)
+    assert _parse_levels_args("/sell 1 at 65000", default_anchor="sell",
+                              allow_bare=True) == (1.0, "sell", 65000.0)
+    assert _parse_levels_args("sell at 65k, keep 1%") == (1.0, "sell", 65000.0)
+    assert _parse_levels_args("where do i buy to keep 1% if i sell at 65000") == (1.0, "sell", 65000.0)
+    assert _parse_levels_args("good sell price, want 1%") == (1.0, "sell", None)
+    assert _parse_levels_args("reentry price, want 2%") == (2.0, "buy", None)
+
+
 def test_onchain_text_status():
     from agent.onchain import onchain_text
     assert "unavailable" in onchain_text({})                 # no plan access -> honest status

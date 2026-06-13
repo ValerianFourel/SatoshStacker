@@ -28,7 +28,8 @@ _HELP = (
     "`/chart` — price + the leading indicators, plotted\n"
     "`/derivs` (or `/liq`) — funding · open interest · long/short · taker flow\n"
     "`/levels [%]` — reentry & sell zones; add a target (e.g. `/levels 1`) to scale a\n"
-    "          buy→sell pair that nets ~that % after Binance fees + spread\n"
+    "          buy→sell pair that nets ~that % after Binance fees + spread.\n"
+    "          `/sell 1` anchors on the sell instead; or 'sell at 65k, keep 1%'\n"
     "`/onchain` — MVRV · NUPL · SOPR · netflow (CryptoQuant)\n"
     "`/news` — BTC headlines + Fear&Greed (day/week/month)\n"
     "`/alert <metric> <op> <value>` — custom trigger, e.g. `/alert rsi > 70` "
@@ -104,6 +105,37 @@ def _parse_target_pct(text: str, *, allow_bare: bool = False) -> float | None:
     return v if 0 < v <= 50 else None       # sane bound; ignore absurd inputs
 
 
+_PX_SUF = {"k": 1e3, "m": 1e6, None: 1}
+
+
+def _parse_levels_args(text: str, *, default_anchor: str = "buy", allow_bare: bool = False):
+    """-> (target_pct, anchor, anchor_price). Understands 'sell at 65k', 'buy near 60000',
+    a bare 'at 65000', the side word, and the target %; an explicit 'side at price' pins
+    the anchored side. [^\\d] guards stop a 'sell … at' span from eating the target number."""
+    low = text.lower()
+    anchor_price = explicit_side = None
+    m = re.search(r"\b(sell|buy)\b[^\d]{0,14}?(?:\bat\b|@|\bnear\b|\baround\b)"
+                  r"\s*\$?(\d+(?:\.\d+)?)\s*([km])?", low)
+    if m:
+        explicit_side = "sell" if m.group(1) == "sell" else "buy"
+        v = float(m.group(2)) * _PX_SUF[m.group(3)]
+        if v >= 1000:
+            anchor_price = v
+        low = low[:m.start()] + " " + low[m.end():]
+    else:
+        m2 = re.search(r"(?:\bat\b|@|\bnear\b|\baround\b)\s*\$?(\d+(?:\.\d+)?)\s*([km])?", low)
+        if m2 and float(m2.group(1)) * _PX_SUF[m2.group(2)] >= 1000:
+            anchor_price = float(m2.group(1)) * _PX_SUF[m2.group(2)]
+            low = low[:m2.start()] + " " + low[m2.end():]
+    if explicit_side:
+        anchor = explicit_side
+    elif "sell" in low and not any(k in low for k in ("buy", "entry", "reentry", "reenter")):
+        anchor = "sell"
+    else:
+        anchor = default_anchor
+    return _parse_target_pct(low, allow_bare=allow_bare), anchor, anchor_price
+
+
 _DIR_DN = ("below", "under", "drops", "falls", "less than", "lower", "crosses below", "<")
 
 
@@ -167,8 +199,10 @@ class TelegramListener:
             from .levels import levels_text
             if not snap:
                 return "no snapshot yet — warming up"
-            return levels_text(snap, target_pct=_parse_target_pct(low, allow_bare=True),
-                               fee_pct=self.cfg.fee_pct)
+            dflt = "sell" if low.split(" ", 1)[0] == "/sell" else "buy"
+            tgt, anc, ap = _parse_levels_args(text, default_anchor=dflt, allow_bare=True)
+            return levels_text(snap, target_pct=tgt, fee_pct=self.cfg.fee_pct,
+                               anchor=anc, anchor_price=ap)
         if low in ("/onchain", "/mvrv", "/sopr", "/nupl"):
             from .onchain import onchain_text
             return onchain_text((snap or {}).get("onchain") or {})
@@ -212,8 +246,9 @@ class TelegramListener:
                                   "sell price", "buy price", "good buy", "good sell",
                                   "where to buy", "where to sell", "add sats")):
             from .levels import levels_text
-            return levels_text(snap, target_pct=_parse_target_pct(low),
-                               fee_pct=self.cfg.fee_pct)
+            tgt, anc, ap = _parse_levels_args(text)
+            return levels_text(snap, target_pct=tgt, fee_pct=self.cfg.fee_pct,
+                               anchor=anc, anchor_price=ap)
         # natural-language trigger: "ping me when rsi above 70"
         if any(p in low for p in ("ping me when", "alert me when", "notify me when",
                                   "let me know when", "tell me when")):
