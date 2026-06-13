@@ -373,22 +373,73 @@ def load_tuned(path: str = SIGNALS_PATH) -> dict | None:
         return None
 
 
+_PRETTY = {
+    "rsi_14": "RSI(14)", "rsi_21": "RSI(21)", "stoch_rsi_14": "StochRSI",
+    "stoch_14": "Stoch(14)", "macd_hist": "MACD hist", "cci_20": "CCI(20)",
+    "williams_14": "Williams%R", "roc_10": "ROC(10)", "roc_20": "ROC(20)",
+    "bb_pctb_20": "Boll %B", "bb_width_20": "Boll width", "keltner_pos_20": "Keltner",
+    "atr_pct_14": "ATR%", "ema_cross_21_50": "EMA 21/50", "ema_cross_50_200": "EMA 50/200",
+    "sma_dist_200": "SMA-200", "supertrend_10": "Supertrend", "mfi_14": "MFI(14)",
+    "obv_slope_14": "OBV", "vwap_dist_20": "VWAP(20)", "cvd_slope_14": "CVD",
+}
+
+
+def _pretty(name):
+    return _PRETTY.get(name, name)
+
+
+def _score(auc):
+    return int(round((auc or 0.5) * 100))
+
+
+def _quality(auc):
+    s = _score(auc)
+    return ("🟢 strong" if s >= 75 else "🟢 good" if s >= 65
+            else "🟡 fair" if s >= 58 else "🔴 weak")
+
+
 def leaderboard_text(res: dict) -> str:
-    def fam(items):
-        return "\n".join(f"    [{d['family']:<10}] {d['name']:<16} "
-                         f"AUC {d['auc']:.2f} F1 {d['f1']:.2f} thr {d['threshold']}"
-                         for d in items[:5])
-    lines = [f"🔬 Signal tune — {res.get('symbol','')}  (live TF {res.get('live_tf','')})"]
+    tf = res.get("live_tf", "1h")
     bt, bb = res.get("best_top"), res.get("best_bottom")
+    L = [f"🔬 *BTC top/bottom scan* — live candles `{tf}`"]
+
+    # ── the headline: which indicator is best RIGHT NOW ──
+    L.append("\n👑 *Best caller right now*")
     if bt:
-        lines.append(f"LIVE top-caller:    {bt['name']} ({bt['family']}, AUC {bt['auc']:.2f})")
+        L.append(f"📈 Tops:  *{_pretty(bt['name'])}*  —  {_score(bt['auc'])}/100  {_quality(bt['auc'])}")
     if bb:
-        lines.append(f"LIVE bottom-caller: {bb['name']} ({bb['family']}, AUC {bb['auc']:.2f})")
-    for tf, r in res.get("per_timeframe", {}).items():
-        lines.append(f"\n— {tf}: {r['n_tops']} tops / {r['n_bottoms']} bottoms "
-                     f"({r['bars']} bars) —")
-        lines.append("  best TOP-caller per family:")
-        lines.append(fam(r["top_by_family"]))
-        lines.append("  best BOTTOM-caller per family:")
-        lines.append(fam(r["bottom_by_family"]))
-    return "\n".join(lines)
+        L.append(f"📉 Bottoms:  *{_pretty(bb['name'])}*  —  {_score(bb['auc'])}/100  {_quality(bb['auc'])}")
+
+    # ── leading indicators (best one per family), ranked, winner crowned ──
+    def block(items):
+        rows = []
+        for i, d in enumerate(items[:4]):
+            crown = "👑" if i == 0 else "  "
+            rows.append(f"{crown} {_pretty(d['name']):<11} {d['family']:<10} {_score(d['auc']):>3}/100")
+        return "```\n" + "\n".join(rows) + "\n```" if rows else ""
+
+    live = res.get("per_timeframe", {}).get(tf, {})
+    if live.get("top_by_family"):
+        L.append(f"\n🏅 *Leading top-callers* (`{tf}`, best of each family)")
+        L.append(block(live["top_by_family"]))
+    if live.get("bottom_by_family"):
+        L.append(f"🏅 *Leading bottom-callers* (`{tf}`)")
+        L.append(block(live["bottom_by_family"]))
+
+    # ── one glance across all timeframes ──
+    rows = [f"{'TF':<4} {'TOP-caller':<16} BOTTOM-caller"]
+    best_tf, best_s = tf, 0
+    for t, r in res.get("per_timeframe", {}).items():
+        tt, bbx = r.get("best_top"), r.get("best_bottom")
+        ts = f"{_pretty(tt['name'])} {_score(tt['auc'])}" if tt else "—"
+        bs = f"{_pretty(bbx['name'])} {_score(bbx['auc'])}" if bbx else "—"
+        s = max(_score(tt['auc']) if tt else 0, _score(bbx['auc']) if bbx else 0)
+        if s > best_s:
+            best_s, best_tf = s, t
+        rows.append(f"{t:<4} {ts:<16} {bs}{'  ← live' if t == tf else ''}")
+    L.append("\n🕐 *Best across timeframes*")
+    L.append("```\n" + "\n".join(rows) + "\n```")
+
+    L.append(f"_score = hit-rate vs coin-flip (50). 65+ = usable, 75+ = strong. "
+             f"Cleanest signals on `{best_tf}`. Live detector uses the `{tf}` winners._")
+    return "\n".join(L)

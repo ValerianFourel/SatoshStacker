@@ -151,7 +151,8 @@ def test_listener_routing():
                            analyst=MockAnalyst(), notifier=FakeNotifier(),
                            snapshot_fn=lambda: snap)
     assert "read-only" in lis.handle_text("/help")
-    assert "BTC $" in lis.handle_text("/raw")
+    raw = lis.handle_text("/raw")
+    assert "BTC" in raw and "$" in raw and "RSI" in raw
     assert "mock answer" in lis.handle_text("is this a top?")
     # the guide is discoverable (bare "help") and actually explains the features
     for trigger in ("help", "?", "/start"):

@@ -223,28 +223,29 @@ class AnomalyDetector:
         out: list[Signal] = []
         near_high = tech["pct_from_high_24h"] >= -c.near_extreme_pct
         near_low = tech["pct_from_low_24h"] <= c.near_extreme_pct
+        from .signal_tuner import _pretty, _score
         tuned = m.get("tuned", {})
         tp, bt = tuned.get("top"), tuned.get("bottom")
         # TOP: tuned backtest-winner if present, else the default RSI+near-high rule
         if tp:
             if tp["value"] >= tp["threshold"]:
                 out.append(Signal("peak", "peak",
-                    f"price ${m['price']:,.0f} — {tp['name']}={tp['value']} ≥ "
-                    f"{tp['threshold']} (tuned top-caller, AUC {tp.get('auc')})"))
+                    f"{_pretty(tp['name'])} at {tp['value']} (fires ≥{tp['threshold']}) "
+                    f"— tuned top-caller, score {_score(tp.get('auc'))}"))
         elif near_high and tech["rsi_14"] >= c.rsi_overbought:
             out.append(Signal("peak", "peak",
-                f"price ${m['price']:,.0f} at 24h-high (RSI {tech['rsi_14']}, "
-                f"{tech['pct_from_high_24h']:+.2f}% from high)"))
+                f"at 24h-high, RSI {tech['rsi_14']} overbought "
+                f"({tech['pct_from_high_24h']:+.2f}% from high)"))
         # BOTTOM: tuned winner if present, else default RSI+near-low rule
         if bt:
             if bt["value"] <= bt["threshold"]:
                 out.append(Signal("bottom", "bottom",
-                    f"price ${m['price']:,.0f} — {bt['name']}={bt['value']} ≤ "
-                    f"{bt['threshold']} (tuned bottom-caller, AUC {bt.get('auc')})"))
+                    f"{_pretty(bt['name'])} at {bt['value']} (fires ≤{bt['threshold']}) "
+                    f"— tuned bottom-caller, score {_score(bt.get('auc'))}"))
         elif near_low and tech["rsi_14"] <= c.rsi_oversold:
             out.append(Signal("bottom", "bottom",
-                f"price ${m['price']:,.0f} at 24h-low (RSI {tech['rsi_14']}, "
-                f"{tech['pct_from_low_24h']:+.2f}% from low)"))
+                f"at 24h-low, RSI {tech['rsi_14']} oversold "
+                f"({tech['pct_from_low_24h']:+.2f}% from low)"))
         if vol["z"] >= c.vol_z_threshold:
             out.append(Signal("volume_spike", "spike",
                 f"volume {vol['surge_x']}x normal (z={vol['z']})"))
@@ -362,18 +363,24 @@ class MarketMonitor:
             self._save_state()
         return m
 
+    _ICON = {"peak": "📈", "bottom": "📉", "spike": "⚡", "microstructure": "📖"}
+    _TITLE = {"peak": "possible TOP forming", "bottom": "possible BOTTOM forming",
+              "spike": "unusual move", "microstructure": "order-book shift"}
+
     def _handle_events(self, m: dict, fired: list[Signal]) -> None:
-        kinds = ", ".join(f"{s.kind.upper()}: {s.detail}" for s in fired)
-        log.info("anomaly fired: %s", kinds)
-        header = "🚨 *BTC anomaly* — " + ", ".join(s.name for s in fired)
+        log.info("anomaly fired: %s", ", ".join(s.name for s in fired))
+        head = (f"🚨 *BTC alert* — {self._TITLE.get(fired[0].kind, 'unusual behaviour')}"
+                f"  ·  `${m.get('price', 0):,.0f}`")
+        triggers = "\n".join(f"{self._ICON.get(s.kind, '•')} {s.detail}" for s in fired)
+        body = f"{head}\n{triggers}"
         if self.cfg.analyst_enabled and self.analyst is not None:
             try:
                 read = self.analyst.event_read(m, fired)
-                self.notifier.send(f"{header}\n{kinds}\n\n🧠 {read}")
+                self.notifier.send(f"{body}\n\n🧠 {read}")
                 return
             except Exception as e:  # noqa: BLE001 - never let analysis break the loop
                 log.warning("analyst event_read failed: %s", e)
-        self.notifier.send(f"{header}\n{kinds}")  # numeric-only fallback
+        self.notifier.send(body)  # numeric-only fallback
 
     def run(self, stop) -> None:
         """Loop until ``stop`` (a threading.Event-like with .is_set/.wait) is set."""

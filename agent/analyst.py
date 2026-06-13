@@ -48,27 +48,41 @@ _SYSTEM = (
 
 
 def numeric_summary(m: dict) -> str:
-    """Deterministic one-glance summary — the /raw reply and the fail-safe."""
+    """Deterministic one-glance card — the /raw reply and the LLM fail-safe."""
     if not m:
-        return "no snapshot yet"
+        return "📊 no snapshot yet — monitor is warming up"
     t, v, b = m.get("technicals", {}), m.get("volume", {}), m.get("order_book", {})
-    lines = [
-        f"BTC ${m.get('price', 0):,.0f}  ({m.get('iso','')})",
-        f"RSI {t.get('rsi_14','?')} | trend {t.get('ema_trend_pct','?')}% | "
-        f"vol(realized) {t.get('realized_vol_pct','?')}% | ATR {t.get('atr_pct','?')}%",
-        f"24h range pos {t.get('range_position_pct','?')}%  "
-        f"(from high {t.get('pct_from_high_24h','?')}%, from low {t.get('pct_from_low_24h','?')}%)",
-        f"ret 1m {t.get('ret_1m_pct','?')}% / 5m {t.get('ret_5m_pct','?')}% / 1h {t.get('ret_1h_pct','?')}%",
-        f"volume {v.get('surge_x','?')}x (z={v.get('z','?')})",
+    price = m.get("price", 0)
+    rsi = t.get("rsi_14", 50)
+    rlabel = "overbought" if rsi >= 70 else "oversold" if rsi <= 30 else "neutral"
+    rows = [
+        f"RSI(14)     {rsi:<6}{rlabel}",
+        f"Trend       {t.get('ema_trend_pct', 0):+.2f}%  (EMA 9/21)",
+        f"24h range   {t.get('range_position_pct', 0):.0f}%   "
+        f"{t.get('pct_from_high_24h', 0):+.1f}% high / {t.get('pct_from_low_24h', 0):+.1f}% low",
+        f"Move        1m {t.get('ret_1m_pct', 0):+.2f}%  5m {t.get('ret_5m_pct', 0):+.2f}%  "
+        f"1h {t.get('ret_1h_pct', 0):+.2f}%",
+        f"Volume      {v.get('surge_x', 1)}x avg   (z {v.get('z', 0):+.1f})",
+        f"Volatility  ATR {t.get('atr_pct', 0):.2f}%  ·  realized {t.get('realized_vol_pct', 0):.3f}%",
     ]
     if b.get("ok"):
         band = b.get("bands", {}).get("1.0", {})
-        lines.append(f"book ±1%: bid {band.get('bid','?')} / ask {band.get('ask','?')} "
-                     f"(imb {band.get('imbalance','?')}), spread {b.get('spread_bps','?')}bps")
-    ev = m.get("events")
-    if ev:
-        lines.append("events: " + ", ".join(ev))
-    return "\n".join(lines)
+        rows.append(f"Book ±1%     bid {band.get('bid', 0)} / ask {band.get('ask', 0)}  "
+                    f"(lean {band.get('imbalance', 0):+.2f})")
+    tuned = m.get("tuned", {})
+    if tuned.get("top") or tuned.get("bottom"):
+        from .signal_tuner import _pretty
+        for side, arrow in (("top", ">="), ("bottom", "<=")):
+            s = tuned.get(side)
+            if s:
+                rows.append(f"{'Top-watch' if side == 'top' else 'Bot-watch':<11} "
+                            f"{_pretty(s['name'])} {s['value']} (fires {arrow}{s['threshold']})")
+    hhmm = (m.get("iso", "") or "")[11:16]
+    out = (f"📊 *BTC*  `${price:,.0f}`   _{hhmm}Z_\n"
+           "```\n" + "\n".join(rows) + "\n```")
+    if m.get("events"):
+        out += "⚠️ *fired:* " + ", ".join(m["events"])
+    return out
 
 
 def _features(m: dict) -> dict:

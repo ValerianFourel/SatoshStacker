@@ -134,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     mon_thread = threading.Thread(target=monitor.run, args=(stop,), daemon=True)
     mon_thread.start()
 
-    notifier.send("🟢 SatoshiStacker BTC watch online (read-only). Send /help.")
+    notifier.send("🟢 *BTC watch online* — tracking live; I'll ping you on tops, bottoms "
+                  "& unusual moves. Type /help any time.")
     _first_launch_onboarding(notifier, cfg.onboarded_marker)  # one-time, first launch only
 
     if cfg.poll_telegram:
