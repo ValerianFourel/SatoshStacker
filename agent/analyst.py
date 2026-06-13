@@ -33,6 +33,7 @@ _SYSTEM = (
     "horizon being asked about.\n"
     "• `order_book` — depth/imbalance now. `futures` — perp funding (per 8h) + open interest.\n"
     "• `tuned_signals` — the backtest-best top/bottom indicators and their current readings.\n"
+    "• `stacking_levels` — structural reentry (buy) & sell zones from support/resistance.\n"
     "• `news.sentiment` — Fear&Greed for day/week/month; `headlines` are recent.\n"
     "ORDER OF PRIORITY: read PRICE, CANDLES, order book, funding & OI FIRST; treat news "
     "& sentiment as SECONDARY context, not the lead. Say which timeframe a reading is on. "
@@ -44,8 +45,11 @@ _SYSTEM = (
     "many, choose any of `available_indicators` (each image = price + its panels). [] = default. "
     "If you need fresh context set `search` to ONE concise query (else \"\"); for a time "
     "window set `search_after`/`search_before` as YYYY-MM-DD (resolve relative phrases via "
-    "`today`). HARD RULE: read-only — NO buy/sell/hold advice, targets, or sizing; describe, "
-    "don't direct. You MAY save notes to scratch files. Respond with STRICT JSON only:\n"
+    "`today`). GOAL: the operator stacks satoshis (accumulate BTC; lower entries = more "
+    "sats/$). When asked for a reentry/sell price, present `stacking_levels` (structural "
+    "support/resistance) as levels of interest for stacking — caveat: not financial advice, "
+    "the bot never trades. Otherwise stay descriptive (no directive buy/sell/hold or sizing). "
+    "You MAY save notes to scratch files. Respond with STRICT JSON only:\n"
     '{"reply":"<=140 words","plot":[["rsi_14","macd_hist"],["obv_slope_14","vwap_dist_20"]],'
     '"search":"<query or empty>","search_after":"<YYYY-MM-DD or empty>",'
     '"search_before":"<YYYY-MM-DD or empty>","files":[{"name":"notes.md","content":"..."}]}'
@@ -83,6 +87,8 @@ def numeric_summary(m: dict) -> str:
         oic = fut.get("oi_change_24h_pct")
         rows.append(f"Open int.   {fut['open_interest']:,.0f} BTC"
                     + (f"  ({oic:+.1f}% 24h)" if oic is not None else ""))
+    if fut.get("long_short_ratio") is not None:
+        rows.append(f"Long/Short  {fut['long_short_ratio']:.2f}  (retail accounts)")
     tuned = m.get("tuned", {})
     if tuned.get("top") or tuned.get("bottom"):
         from .signal_tuner import _pretty
@@ -98,6 +104,14 @@ def numeric_summary(m: dict) -> str:
     if m.get("events"):
         out += "\n⚠️ *fired:* " + ", ".join(m["events"])
     return out
+
+
+def _stacking_levels(m: dict):
+    try:
+        from .levels import suggest_levels
+        return suggest_levels(m)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _features(m: dict) -> dict:
@@ -122,6 +136,7 @@ def _features(m: dict) -> dict:
         "order_book": m.get("order_book"),
         "futures": m.get("futures"),
         "tuned_signals": m.get("tuned"),
+        "stacking_levels": _stacking_levels(m),   # structural reentry/sell zones
         "events_fired": m.get("events"),
     }
 

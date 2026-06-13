@@ -164,6 +164,7 @@ class WatchConfig:
     convo_path: str = "state/conversation.json"
     convo_ttl_s: int = 86_400       # remember exchanges this long (24h)
     convo_max_turns: int = 12       # ...and at most this many recent turns
+    user_alerts_path: str = "state/user_alerts.json"  # custom trigger rules
     data_retention_days: int = 90   # prune any pulled-data files older than this
 
     @staticmethod

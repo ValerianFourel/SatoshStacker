@@ -120,7 +120,8 @@ def public_funding_oi(symbol: str, *, timeout: float = 8.0) -> dict:
     Fail-safe: any field that can't be fetched (e.g. futures geo-blocked) stays None."""
     fsym = symbol.split("/")[0] + "USDT"
     out: dict = {"funding_rate": None, "mark": None, "open_interest": None,
-                 "oi_change_24h_pct": None, "next_funding_ms": None}
+                 "oi_change_24h_pct": None, "next_funding_ms": None,
+                 "long_short_ratio": None}
     try:
         p = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex",
                          params={"symbol": fsym}, timeout=timeout).json()
@@ -128,6 +129,14 @@ def public_funding_oi(symbol: str, *, timeout: float = 8.0) -> dict:
         out["mark"] = float(p["markPrice"])
         out["next_funding_ms"] = int(p.get("nextFundingTime", 0))
     except Exception:  # noqa: BLE001 - funding optional
+        pass
+    try:  # global long/short account ratio (retail positioning / crowding)
+        ls = requests.get("https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                          params={"symbol": fsym, "period": "1h", "limit": 1},
+                          timeout=timeout).json()
+        if ls:
+            out["long_short_ratio"] = float(ls[-1]["longShortRatio"])
+    except Exception:  # noqa: BLE001
         pass
     try:
         oi = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
@@ -146,6 +155,56 @@ def public_funding_oi(symbol: str, *, timeout: float = 8.0) -> dict:
     except Exception:  # noqa: BLE001
         pass
     return out
+
+
+def public_derivs_history(symbol: str, *, period: str = "1h", limit: int = 96,
+                          timeout: float = 10.0) -> dict:
+    """Binance USDT-perp CRYPTO-NATIVE time-series (no key). Each series is a list of
+    (ms, value): open interest, funding rate, global long/short account ratio, and
+    taker buy/sell ratio (a CVD-style flow gauge). Fail-safe: a series that can't be
+    fetched (e.g. futures geo-blocked) comes back empty."""
+    fsym = symbol.split("/")[0] + "USDT"
+
+    def _get(url, params, tkey, vkey):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return [(int(x[tkey]), float(x[vkey])) for x in r.json()]
+        except Exception:  # noqa: BLE001 - any series is optional
+            return []
+
+    base = "https://fapi.binance.com/futures/data"
+    p = {"symbol": fsym, "period": period, "limit": limit}
+    return {
+        "open_interest": _get(f"{base}/openInterestHist", p, "timestamp", "sumOpenInterest"),
+        "long_short_ratio": _get(f"{base}/globalLongShortAccountRatio", p,
+                                 "timestamp", "longShortRatio"),
+        "top_trader_ls": _get(f"{base}/topLongShortPositionRatio", p,
+                              "timestamp", "longShortRatio"),
+        "taker_buy_sell": _get(f"{base}/takerlongshortRatio", p, "timestamp", "buySellRatio"),
+        "funding_rate": _get("https://fapi.binance.com/fapi/v1/fundingRate",
+                             {"symbol": fsym, "limit": min(limit, 1000)},
+                             "fundingTime", "fundingRate"),
+    }
+
+
+def coinglass_liquidations(symbol: str, *, timeout: float = 10.0) -> dict | None:
+    """Liquidation data from Coinglass IF COINGLASS_API_KEY is set (Binance has no public
+    liquidation map). Returns the raw payload, or None when no key / on any error."""
+    import os
+    key = os.getenv("COINGLASS_API_KEY", "").strip()
+    if not key:
+        return None
+    base = symbol.split("/")[0]
+    try:
+        r = requests.get(
+            "https://open-api-v4.coinglass.com/api/futures/liquidation/aggregated-heatmap",
+            params={"symbol": base + "USDT", "exchange": "Binance", "range": "1d"},
+            headers={"CG-API-KEY": key}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:  # noqa: BLE001 - liquidation map is optional
+        return None
 
 
 class Exchange(abc.ABC):

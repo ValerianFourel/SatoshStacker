@@ -237,6 +237,7 @@ def _futures_block(funding: dict | None) -> dict:
         "funding_annualized_pct": round(fr * 100 * 3 * 365, 1) if fr is not None else None,
         "open_interest": funding.get("open_interest"),
         "oi_change_24h_pct": funding.get("oi_change_24h_pct"),
+        "long_short_ratio": funding.get("long_short_ratio"),
         "mark": funding.get("mark"),
     }
 
@@ -319,6 +320,11 @@ class AnomalyDetector:
             d = ("leverage building" if oic > 0 else "deleveraging / liquidations")
             out.append(Signal("oi_spike", "spike",
                 f"open interest {oic:+.1f}% in 24h — {d}"))
+        lsr = fut.get("long_short_ratio")
+        if lsr is not None and (lsr >= 2.0 or lsr <= 0.6):
+            crowd = "crowded LONG (retail)" if lsr >= 2.0 else "crowded SHORT (retail)"
+            out.append(Signal("long_short_extreme", "spike",
+                f"long/short ratio {lsr:.2f} — {crowd}"))
         return out
 
     def evaluate(self, m: dict, *, now_ts: float) -> list[Signal]:
@@ -384,7 +390,24 @@ class MarketMonitor:
         self.detector = AnomalyDetector(cfg)
         self._mtf_cache: dict = {}
         self._mtf_ts: float = 0.0
+        from .alerts import AlertStore
+        self.alerts = AlertStore(cfg.user_alerts_path)
         self._load_state()
+
+    def _check_user_alerts(self, m: dict) -> None:
+        """Evaluate user-defined trigger rules against the live snapshot; ping on fire."""
+        from .alerts import evaluate
+        rules = self.alerts.load()
+        if not rules:
+            return
+        before = [r.get("armed", True) for r in rules]
+        fired = evaluate(rules, m)
+        if before != [r.get("armed", True) for r in rules]:
+            self.alerts.save(rules)        # persist arm/disarm only when it changed
+        for rule, val in fired:
+            self.notifier.send(
+                f"🔔 *Trigger fired* — `{rule['metric']} {rule['op']} {rule['value']}`"
+                f"  →  now `{val:g}`   (#{rule['id']})")
 
     def _multi_tf(self, now: float) -> dict:
         """RSI(14) + EMA trend per 5m/1h/4h/1d so the LLM sees each timeframe by name.
@@ -491,6 +514,7 @@ class MarketMonitor:
         if fired:
             self._handle_events(m, fired)
             self._save_state()
+        self._check_user_alerts(m)
         self._maybe_daily_update(now, m)
         return m
 

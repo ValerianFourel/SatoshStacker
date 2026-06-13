@@ -69,6 +69,77 @@ def render_chart(klines: list, *, title: str, panels: list, marks: dict | None =
         return None
 
 
+def render_series_chart(title: str, price_klines: list, panels: list) -> bytes | None:
+    """Price (top) + each panel as its OWN time-series (own x-axis). panels =
+    [(label, [(ms, value), ...], hline_or_None)]. Fail-safe -> None."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from datetime import datetime, timezone
+
+        pa = np.array(price_klines, dtype=float)
+        px = [datetime.fromtimestamp(t / 1000, tz=timezone.utc) for t in pa[:, 0]]
+        n = 1 + len(panels)
+        fig, axes = plt.subplots(n, 1, figsize=(9, 2.0 + 1.4 * n),
+                                 gridspec_kw={"height_ratios": [2.2] + [1] * len(panels),
+                                              "hspace": 0.18})
+        if n == 1:
+            axes = [axes]
+        axes[0].plot(px, pa[:, 4], color="#f7931a", lw=1.4)
+        axes[0].set_title(title, fontsize=11, loc="left")
+        axes[0].grid(alpha=0.2)
+        axes[0].set_ylabel("price")
+        for i, (label, series, hline) in enumerate(panels):
+            ax = axes[i + 1]
+            if series:
+                t = [datetime.fromtimestamp(ms / 1000, tz=timezone.utc) for ms, _ in series]
+                ax.plot(t, [v for _, v in series], lw=1.1, color="#2b6cb0")
+            else:
+                ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes,
+                        fontsize=8, color="#999")
+            ax.set_ylabel(label, fontsize=9)
+            ax.grid(alpha=0.2)
+            if hline is not None:
+                ax.axhline(hline, color="#888", ls="--", lw=0.8)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %Hh"))
+        fig.autofmt_xdate(rotation=0, ha="center")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception as e:  # noqa: BLE001
+        log.warning("derivs chart render failed: %s", e)
+        return None
+
+
+def build_derivs_chart(cfg, *, klines_fn=None, derivs_fn=None) -> tuple[bytes | None, str]:
+    """Crypto-native derivatives chart (Binance perp, no key): price + funding-rate
+    history + open interest + long/short ratio + taker buy/sell flow."""
+    from .exchange import public_derivs_history, public_klines
+    period = cfg.trend_tf if cfg.trend_tf in (
+        "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d") else "1h"
+    if klines_fn is None:
+        klines_fn = lambda tf, lim: public_klines(cfg.symbol, tf, lim)  # noqa: E731
+    if derivs_fn is None:
+        derivs_fn = lambda: public_derivs_history(cfg.symbol, period=period, limit=96)  # noqa: E731
+    kl = klines_fn(period, 96)
+    d = derivs_fn()
+    panels = [
+        ("funding %/8h", [(t, v * 100) for t, v in d.get("funding_rate", [])], 0.0),
+        ("open interest", d.get("open_interest", []), None),
+        ("long/short", d.get("long_short_ratio", []), 1.0),
+        ("taker buy/sell", d.get("taker_buy_sell", []), 1.0),
+    ]
+    png = render_series_chart(
+        f"BTC derivatives ({period}) — funding · OI · long/short · taker flow", kl, panels)
+    cap = ("📉 *BTC derivatives* — funding, open interest, long/short ratio, taker buy/sell "
+           f"(`{period}`, Binance perp). _Liquidation map needs a Coinglass key._")
+    return png, cap
+
+
 def build_btc_chart(cfg, tuned: dict | None, *, snapshot: dict | None = None,
                     klines_fn=None, indicators=None) -> tuple[bytes | None, str]:
     """Fetch candles and plot price + indicators, return (png, caption).

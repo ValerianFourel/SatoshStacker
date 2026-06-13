@@ -26,7 +26,11 @@ _HELP = (
     "`/btc` or `/status` — my read of BTC right now\n"
     "`/raw` — just the numbers, no LLM\n"
     "`/chart` — price + the leading indicators, plotted\n"
+    "`/derivs` (or `/liq`) — funding · open interest · long/short · taker flow\n"
+    "`/levels` — good reentry (buy) & sell zones for stacking sats\n"
     "`/news` — BTC headlines + Fear&Greed (day/week/month)\n"
+    "`/alert <metric> <op> <value>` — custom trigger, e.g. `/alert rsi > 70` "
+    "(or _ping me when rsi above 70_) · `/alerts` · `/delalert <id>`\n"
     "`/search <query>` — search the web, read the top articles, summarize\n"
     "`/notes` — list scratch files · `/get <file>` — read one\n"
     "`/help` — this message\n"
@@ -80,6 +84,23 @@ def _parse_search_dates(text: str):
     return re.sub(r"\s+", " ", text).strip(), after, before
 
 
+_DIR_DN = ("below", "under", "drops", "falls", "less than", "lower", "crosses below", "<")
+
+
+def _nl_to_rule(text: str):
+    """Best-effort 'ping me when rsi above 70' -> (metric, op, value), else None."""
+    low = text.lower()
+    num = re.search(r"(-?\d+(?:\.\d+)?)", low)
+    if not num:
+        return None
+    op = "<" if any(w in low for w in _DIR_DN) else ">"
+    for name in ("long_short", "oi_change", "range_pos", "vol_z", "change_24h",
+                 "funding", "trend", "atr", "price", "rsi", "ls"):
+        if name in low or name.replace("_", " ") in low:
+            return name, op, float(num.group(1))
+    return None
+
+
 class TelegramListener:
     def __init__(self, cfg: WatchConfig, *, token: str, chat_id: str,
                  analyst, notifier, snapshot_fn, scratch=None, news_fn=None) -> None:
@@ -93,9 +114,11 @@ class TelegramListener:
         self.snapshot_fn = snapshot_fn       # () -> dict | None
         self.scratch = scratch
         self.news_fn = news_fn               # () -> dict | None  (BTC news + Fear&Greed)
+        from .alerts import AlertStore
         from .convo import Conversation
         self.convo = Conversation(cfg.convo_path, ttl_s=cfg.convo_ttl_s,
                                   max_turns=cfg.convo_max_turns)
+        self.alerts = AlertStore(cfg.user_alerts_path)
         self._offset = 0
 
     # ── routing (pure given injected deps) ──
@@ -115,6 +138,14 @@ class TelegramListener:
         if low in ("/chart", "/plot"):
             self._send_charts(snap)
             return ""        # photo(s) already sent; no extra text
+        if low in ("/derivs", "/liq", "/funding", "/oi"):
+            from .plotter import build_derivs_chart
+            png, cap = build_derivs_chart(self.cfg)
+            self.notifier.send_photo(png, cap)
+            return ""
+        if low in ("/levels", "/entry", "/sell", "/buy"):
+            from .levels import levels_text
+            return levels_text(snap) if snap else "no snapshot yet — warming up"
         if low == "/news":
             from .websearch import news_line
             return news_line(self.news_fn()) if self.news_fn else "news disabled"
@@ -131,10 +162,38 @@ class TelegramListener:
                 return "```\n" + self.scratch.read(text[5:].strip())[:3500] + "\n```"
             except Exception as e:  # noqa: BLE001
                 return f"can't read that file: {e}"
+        if low == "/alerts":
+            rules = self.alerts.load()
+            if not rules:
+                return "🔔 no triggers set — e.g. `/alert rsi > 70` or _ping me when rsi above 70_"
+            return "🔔 *Triggers:*\n" + "\n".join(
+                f"#{r['id']}  `{r['metric']} {r['op']} {r['value']}`" for r in rules)
+        if low.startswith("/alert "):
+            return self._add_alert(text[7:], snap)
+        if low.startswith("/delalert "):
+            ids = re.findall(r"\d+", text)
+            return ("✅ removed" if ids and self.alerts.remove(int(ids[0]))
+                    else "usage: `/delalert <id>` (see `/alerts`)")
+        if low == "/clearalerts":
+            self.alerts.clear()
+            return "✅ all triggers cleared"
         if low.startswith("/"):
             return _HELP
         if not snap:
             return "no snapshot yet — monitor is warming up"
+        # reentry/sell price request -> sat-stacking levels (structure-based)
+        if any(p in low for p in ("reentry", "re-entry", "reenter", "entry price",
+                                  "sell price", "buy price", "good buy", "good sell",
+                                  "where to buy", "where to sell", "add sats")):
+            from .levels import levels_text
+            return levels_text(snap)
+        # natural-language trigger: "ping me when rsi above 70"
+        if any(p in low for p in ("ping me when", "alert me when", "notify me when",
+                                  "let me know when", "tell me when")):
+            rule = _nl_to_rule(text)
+            if not rule:
+                return "tell me like: _ping me when rsi above 70_  (or `/alert rsi > 70`)"
+            return self._add_alert(f"{rule[0]} {rule[1]} {rule[2]}", snap)
         # natural-language chart request -> send the LLM-orchestrated patchwork
         if "show me" in low or any(w in low for w in ("chart", "plot", "graph", "draw")):
             self._send_charts(snap, question=text)
@@ -164,6 +223,19 @@ class TelegramListener:
                 self.notifier.send_photo(png, cap)
                 sent += 1
         return sent
+
+    def _add_alert(self, spec: str, snap) -> str:
+        from .alerts import SUPPORTED, parse_rule, resolve_metric
+        p = parse_rule(spec)
+        if not p:
+            return ("format: `/alert <metric> <op> <value>` — e.g. `/alert rsi > 70`\n"
+                    f"metrics: {SUPPORTED}")
+        metric, op, value = p
+        if snap and resolve_metric(snap, metric) is None:
+            return f"unknown metric `{metric}`.\nmetrics: {SUPPORTED}"
+        r = self.alerts.add(metric, op, value)
+        return (f"✅ trigger *#{r['id']}* set: `{metric} {op} {value}` — I'll ping each time it "
+                f"crosses. `/alerts` to list · `/delalert {r['id']}` to remove.")
 
     # ── network ──
     def _process_update(self, update: dict) -> None:

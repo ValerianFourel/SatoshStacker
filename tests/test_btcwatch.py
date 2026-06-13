@@ -130,6 +130,7 @@ def test_monitor_run_once_fires_event_and_writes_snapshot(tmp_path):
                       state_path=str(tmp_path / "state.json"),
                       tuned_signals_path=str(tmp_path / "none.json"),  # no tuned -> RSI rule
                       alert_charts=False,                              # hermetic: no chart fetch
+                      user_alerts_path=str(tmp_path / "alerts.json"),  # isolated alerts
                       daily_update_tzs=())                             # no digest in this test
     note = FakeNotifier()
 
@@ -467,6 +468,26 @@ def test_compute_metrics_adds_funding_and_oi():
     assert m["futures"]["open_interest"] == 97_867.0
 
 
+def test_derivs_chart_renders():
+    from agent.plotter import build_derivs_chart
+    kl = [[float(i * 3_600_000), 100 + i, 101 + i, 99 + i, 100 + i, 10.0] for i in range(40)]
+    derivs = {"funding_rate": [(i * 3_600_000, 0.0001) for i in range(40)],
+              "open_interest": [(i * 3_600_000, 90_000 + i) for i in range(40)],
+              "long_short_ratio": [(i * 3_600_000, 1.5) for i in range(40)],
+              "taker_buy_sell": [(i * 3_600_000, 1.1) for i in range(40)]}
+    png, cap = build_derivs_chart(WatchConfig(), klines_fn=lambda tf, lim: kl,
+                                  derivs_fn=lambda: derivs)
+    assert png is None or png[:4] == b"\x89PNG"
+    assert "derivatives" in cap.lower() and "Coinglass" in cap
+
+
+def test_detector_long_short_extreme():
+    det = AnomalyDetector(WatchConfig())
+    m = make_metrics()
+    m["futures"] = {"long_short_ratio": 2.5}
+    assert "long_short_extreme" in [s.name for s in det.evaluate(m, now_ts=0.0)]
+
+
 def test_detector_funding_and_oi_flags():
     det = AnomalyDetector(WatchConfig())
     m = make_metrics()
@@ -533,6 +554,83 @@ def test_listener_chart_command_sends_photo(monkeypatch):
                            notifier=note, snapshot_fn=lambda: {"price": 1})
     assert lis.handle_text("/chart") == ""        # photo sent, no text reply
     assert note.photos and note.photos[0][0] == b"\x89PNG-data"
+
+
+# ── custom user triggers ──
+def test_alert_parse_and_resolve():
+    from agent.alerts import parse_rule, resolve_metric
+    assert parse_rule("rsi > 70") == ("rsi", ">", 70.0)
+    assert parse_rule("price<60000") == ("price", "<", 60_000.0)
+    assert parse_rule("funding >= 0.05") == ("funding", ">=", 0.05)
+    assert parse_rule("gibberish") is None
+    snap = {"price": 63_000, "technicals": {"rsi_14": 55},
+            "futures": {"long_short_ratio": 1.6}, "multi_tf": {"4h": {"rsi_14": 61}}}
+    assert resolve_metric(snap, "rsi") == 55
+    assert resolve_metric(snap, "price") == 63_000
+    assert resolve_metric(snap, "ls") == 1.6
+    assert resolve_metric(snap, "rsi_4h") == 61
+    assert resolve_metric(snap, "bogus") is None
+
+
+def test_alert_fires_once_then_rearms():
+    from agent.alerts import evaluate
+    rules = [{"id": 1, "metric": "rsi", "op": ">", "value": 70, "armed": True}]
+    assert len(evaluate(rules, {"technicals": {"rsi_14": 80}})) == 1     # crosses up -> fire
+    assert evaluate(rules, {"technicals": {"rsi_14": 80}}) == []         # still high -> no spam
+    evaluate(rules, {"technicals": {"rsi_14": 60}})                      # drops -> re-arm
+    assert len(evaluate(rules, {"technicals": {"rsi_14": 80}})) == 1     # crosses again -> fire
+
+
+def test_alert_store_and_listener_commands(tmp_path):
+    cfg = WatchConfig(user_alerts_path=str(tmp_path / "a.json"))
+    snap = {"price": 63_000, "technicals": {"rsi_14": 55}, "futures": {}, "volume": {}}
+    lis = TelegramListener(cfg, token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: snap)
+    assert "set" in lis.handle_text("/alert rsi > 70")
+    assert "#1" in lis.handle_text("/alerts")
+    assert "set" in lis.handle_text("ping me when price below 60000")   # natural language
+    assert "removed" in lis.handle_text("/delalert 1")
+
+
+def test_monitor_fires_user_alert(tmp_path):
+    from agent.alerts import AlertStore
+    apath = str(tmp_path / "a.json")
+    AlertStore(apath).add("rsi", ">", 70, clock=lambda: 0.0)
+    cfg = WatchConfig(snapshot_path=str(tmp_path / "s.json"),
+                      state_path=str(tmp_path / "st.json"), user_alerts_path=apath,
+                      tuned_signals_path=str(tmp_path / "none.json"),
+                      daily_update_tzs=(), alert_charts=False)
+    note = FakeNotifier()
+    mon = MarketMonitor(cfg, notifier=note, analyst=MockAnalyst(), price_fn=lambda: 1,
+                        klines_fn=lambda a, b: [], book_fn=lambda: {},
+                        ticker_fn=lambda: None, funding_fn=lambda: None, clock=lambda: 0.0)
+    mon._check_user_alerts({"technicals": {"rsi_14": 80}})
+    assert any("Trigger fired" in s for s in note.sent)
+
+
+# ── sat-stacking levels tool ──
+def test_levels_suggests_reentry_and_sell():
+    from agent.levels import levels_text, suggest_levels
+    snap = compute_metrics(price=63_500.0, klines_fast=flat_fast(price=63_500.0),
+                           klines_trend=trend_klines(start=61_000.0, end=64_000.0),
+                           order_book=book(mid=63_500.0), cfg=WatchConfig(), now_ts=1.0,
+                           ticker24={"low": 62_830.0, "high": 64_394.0, "change_pct": 0.1})
+    lv = suggest_levels(snap)
+    assert lv["reentry"][0] < lv["reentry"][1] <= lv["price"]   # buy zone below price
+    assert lv["sell"][0] >= lv["price"]                         # sell zone above price
+    txt = levels_text(snap)
+    assert "Reenter" in txt and "Sell" in txt and "stack" in txt.lower()
+
+
+def test_listener_levels_command_and_nl():
+    snap = compute_metrics(price=63_500.0, klines_fast=flat_fast(price=63_500.0),
+                           klines_trend=trend_klines(start=61_000.0, end=64_000.0),
+                           order_book=book(mid=63_500.0), cfg=WatchConfig(), now_ts=1.0,
+                           ticker24={"low": 62_830.0, "high": 64_394.0, "change_pct": 0.1})
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: snap)
+    assert "Reenter" in lis.handle_text("/levels")
+    assert "Reenter" in lis.handle_text("what's a good reentry and sell price?")
 
 
 def test_first_launch_onboarding_sends_once(tmp_path):
