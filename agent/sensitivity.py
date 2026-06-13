@@ -28,6 +28,9 @@ DEFAULT_CONFLUENCE = 2
 DEFAULT_CADENCE_S = 1800
 CONFLUENCE_RANGE = (1, 6)                    # widget clamp
 CADENCE_RANGE_S = (300, 14_400)             # 5 min … 4 h widget clamp
+# alarm_cooldown: min gap between re-fires of a USER trigger/alarm (anti-spam, set in /origins).
+DEFAULT_ALARM_COOLDOWN_S = 900              # 15 min
+ALARM_COOLDOWN_RANGE_S = (0, 14_400)        # 0 = off … 4 h
 
 # friendly name -> canonical threshold key (for `/sensitivity set <key> <value>`)
 KEY_ALIAS = {
@@ -75,8 +78,9 @@ def _clamp(v, lo, hi):
 
 def read_prefs(path: str, *, default_level: str = "low",
                default_confluence: int = DEFAULT_CONFLUENCE,
-               default_cadence: int = DEFAULT_CADENCE_S) -> dict:
-    """{'sensitivity','muted','overrides','disabled','confluence','cadence'}.
+               default_cadence: int = DEFAULT_CADENCE_S,
+               default_alarm_cooldown: int = DEFAULT_ALARM_COOLDOWN_S) -> dict:
+    """{'sensitivity','muted','overrides','disabled','confluence','cadence','alarm_cooldown'}.
     Missing/garbage -> safe defaults."""
     try:
         with open(path) as f:
@@ -97,10 +101,15 @@ def read_prefs(path: str, *, default_level: str = "low",
         cad = int(d.get("cadence", default_cadence))
     except (TypeError, ValueError):
         cad = default_cadence
+    try:
+        acd = int(d.get("alarm_cooldown", default_alarm_cooldown))
+    except (TypeError, ValueError):
+        acd = default_alarm_cooldown
     return {"sensitivity": lvl if lvl in PRESETS else default_level,
             "muted": bool(d.get("muted", False)), "overrides": ov, "disabled": dis,
             "confluence": _clamp(conf, *CONFLUENCE_RANGE),
-            "cadence": _clamp(cad, *CADENCE_RANGE_S)}
+            "cadence": _clamp(cad, *CADENCE_RANGE_S),
+            "alarm_cooldown": _clamp(acd, *ALARM_COOLDOWN_RANGE_S)}
 
 
 def write_prefs(path: str, **changes) -> dict:

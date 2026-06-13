@@ -175,6 +175,7 @@ class WatchConfig:
     memory_ttl_s: int = 7 * 86_400  # keep ~1 week, then auto-erase (clear with /clear)
     memory_max_turns: int = 24      # most recent chat turns fed back to the LLM
     user_alerts_path: str = "state/user_alerts.json"  # custom trigger rules
+    alarm_cooldown_s: int = 900     # anti-spam: min seconds between re-fires of a user trigger (set in /origins)
     # autonomous news read: the analyst reads news every N hours regardless, caches a copy,
     # and pings ONLY if it decides the news itself is significant (else silent).
     news_digest_hours: float = 8.0
@@ -203,6 +204,7 @@ class WatchConfig:
             alert_cooldown_s=_i("WATCH_ALERT_COOLDOWN_S", 1800),
             confluence_min=_i("WATCH_CONFLUENCE_MIN", 2),
             alert_cadence_s=_i("WATCH_ALERT_CADENCE_S", 1800),
+            alarm_cooldown_s=_i("WATCH_ALARM_COOLDOWN_S", 900),
             news_digest_hours=_f("WATCH_NEWS_DIGEST_HOURS", 8.0),
             analyst_enabled=_b("WATCH_ANALYST_ENABLED", True),
             poll_telegram=_b("WATCH_POLL_TELEGRAM", True),

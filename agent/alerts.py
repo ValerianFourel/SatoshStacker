@@ -8,6 +8,7 @@ Rules persist to a JSON file. Atomic + fail-safe.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
@@ -18,7 +19,8 @@ _OPS = {">": lambda a, b: a > b, "<": lambda a, b: a < b,
         "=": lambda a, b: abs(a - b) < 1e-9, "==": lambda a, b: abs(a - b) < 1e-9}
 
 # user-facing metric names -> where they live in the snapshot (see resolve_metric)
-SUPPORTED = ("price, rsi (=rsi_14), rsi_5m/rsi_1h/rsi_4h/rsi_1d, funding, oi_change, "
+SUPPORTED = ("price, rsi (=rsi_14), rsi_5m/rsi_1h/rsi_4h/rsi_1d, mfi, stoch, stoch_rsi, "
+             "williams, cci, bollinger %b (boll), macd, roc, vwap, obv, funding, oi_change, "
              "ls (long/short), ret_1m/ret_5m/ret_1h, change_24h, range_pos, atr, trend, "
              "vol_z, vol_surge, high_24h, low_24h")
 
@@ -34,28 +36,50 @@ def parse_rule(text: str):
     return metric, m.group(2), float(m.group(3))
 
 
-# ── natural-language composite alarms ("tell me when those 3 metrics are in sell mode") ──
-# Per-metric "mode" condition: what "in sell mode" (frothy/overbought) and "in buy mode"
-# (washed-out/oversold) means for each metric. Aligned with the monitor's own bars.
-MODE_SELL = {"rsi": (">=", 70.0), "funding": (">=", 0.05), "range_pos": (">=", 80.0),
-             "ls": (">=", 2.0), "oi_change": (">=", 8.0), "change_24h": (">=", 3.0),
-             "trend": (">=", 0.3), "vol_z": (">=", 3.0)}
-MODE_BUY = {"rsi": ("<=", 30.0), "funding": ("<=", -0.03), "range_pos": ("<=", 20.0),
-            "ls": ("<=", 0.6), "oi_change": ("<=", -8.0), "change_24h": ("<=", -3.0),
-            "trend": ("<=", -0.3)}
+# ── natural-language composite alarms ("alert me when rsi, mfi & boll % are overbought") ──
+# BOUNDED OSCILLATORS: canonical name -> (overbought_level, oversold_level). "in sell mode" /
+# "overbought" -> >= overbought; "in buy mode" / "oversold" -> <= oversold.
+_OSC = {
+    "rsi": (70.0, 30.0), "mfi_14": (80.0, 20.0), "stoch_14": (80.0, 20.0),
+    "stoch_rsi_14": (80.0, 20.0), "williams_14": (80.0, 20.0), "cci_20": (100.0, -100.0),
+    "bb_pctb_20": (100.0, 0.0), "range_pos": (80.0, 20.0),
+}
+# DIRECTIONAL context metrics: (sell condition, buy condition).
+_DIR = {
+    "funding": ((">=", 0.05), ("<=", -0.03)), "ls": ((">=", 2.0), ("<=", 0.6)),
+    "oi_change": ((">=", 8.0), ("<=", -8.0)), "change_24h": ((">=", 3.0), ("<=", -3.0)),
+    "trend": ((">=", 0.3), ("<=", -0.3)), "vol_z": ((">=", 3.0), ("<=", 3.0)),
+}
+MODE_SELL = {**{k: (">=", ob) for k, (ob, _os) in _OSC.items()},
+             **{k: s for k, (s, _b) in _DIR.items()}}
+MODE_BUY = {**{k: ("<=", os_) for k, (_ob, os_) in _OSC.items()},
+            **{k: b for k, (_s, b) in _DIR.items() if k != "vol_z"}}
 CORE_METRICS = ("rsi", "funding", "range_pos")     # the default trio for an unnamed "N metrics"
 _SELL_WORDS = ("sell mode", "sell-mode", "sell signal", "sell side", "selling", "overbought",
-               "take profit", "take-profit", "distribut", "topping", "froth")
-_BUY_WORDS = ("buy mode", "buy-mode", "buy signal", "buy side", "oversold", "accumulat",
-              "capitulat", "bottoming", "washed out", "washed-out")
-# longest phrases first so "long/short" wins over "short", "open interest" over "oi", etc.
-_METRIC_PHRASES = (("long/short", "ls"), ("long short", "ls"), ("longshort", "ls"),
-                   ("open interest", "oi_change"), ("range position", "range_pos"),
-                   ("range pos", "range_pos"), ("funding", "funding"), ("rsi", "rsi"),
-                   ("trend", "trend"), ("volume", "vol_z"), ("range", "range_pos"),
-                   ("price", "price"), ("change", "change_24h"), ("oi", "oi_change"),
-                   ("ls", "ls"))
+               "over bought", "take profit", "take-profit", "distribut", "topping", "froth")
+_BUY_WORDS = ("buy mode", "buy-mode", "buy signal", "buy side", "oversold", "over sold",
+              "accumulat", "capitulat", "bottoming", "washed out", "washed-out")
+# friendly phrase -> canonical name. LONGEST first so "long/short" beats "short", "stoch rsi"
+# beats "stoch", "open interest" beats "oi", "bollinger %b" beats "bollinger", etc.
+_METRIC_PHRASES = (
+    ("bollinger %b", "bb_pctb_20"), ("bollinger %", "bb_pctb_20"), ("bollinger", "bb_pctb_20"),
+    ("boll %b", "bb_pctb_20"), ("boll %", "bb_pctb_20"), ("boll", "bb_pctb_20"),
+    ("bb %b", "bb_pctb_20"), ("%b", "bb_pctb_20"),
+    ("stoch rsi", "stoch_rsi_14"), ("stochrsi", "stoch_rsi_14"), ("stochastic", "stoch_14"),
+    ("stoch", "stoch_14"), ("williams %r", "williams_14"), ("williams", "williams_14"),
+    ("willr", "williams_14"), ("money flow", "mfi_14"), ("mfi", "mfi_14"), ("cci", "cci_20"),
+    # alias-only battery metrics: recognized (so an unsupported-in-mode request -> None/LLM,
+    # NOT a silent default-trio alarm), even though they have no overbought/oversold "mode".
+    ("macd hist", "macd_hist"), ("macd", "macd_hist"), ("vwap", "vwap_dist_20"),
+    ("obv", "obv_slope_14"), ("keltner", "keltner_pos_20"), ("supertrend", "supertrend_10"),
+    ("roc", "roc_10"), ("atr", "atr"),
+    ("long/short", "ls"), ("long short", "ls"), ("longshort", "ls"),
+    ("open interest", "oi_change"), ("range position", "range_pos"), ("range pos", "range_pos"),
+    ("funding", "funding"), ("rsi", "rsi"), ("trend", "trend"), ("volume", "vol_z"),
+    ("range", "range_pos"), ("price", "price"), ("change", "change_24h"),
+    ("oi", "oi_change"), ("ls", "ls"))
 
+# canonical/alias -> resolvable name. Battery indicators map to their snapshot key.
 _METRIC_ALIASES = {
     "price": "price", "rsi": "rsi", "rsi_14": "rsi", "ret_1m": "ret_1m", "ret_5m": "ret_5m",
     "ret_1h": "ret_1h", "change_24h": "change_24h", "change": "change_24h",
@@ -64,6 +88,19 @@ _METRIC_ALIASES = {
     "low_24h": "low_24h", "vol_z": "vol_z", "volume_z": "vol_z", "vol_surge": "vol_surge",
     "funding": "funding", "oi_change": "oi_change", "oi": "oi_change",
     "ls": "ls", "long_short": "ls", "longshort": "ls",
+    # battery oscillators (resolved from snapshot['indicators'])
+    "mfi": "mfi_14", "mfi_14": "mfi_14", "stoch": "stoch_14", "stoch_14": "stoch_14",
+    "stochastic": "stoch_14", "stoch_rsi": "stoch_rsi_14", "stochrsi": "stoch_rsi_14",
+    "stoch_rsi_14": "stoch_rsi_14", "williams": "williams_14", "willr": "williams_14",
+    "williams_14": "williams_14", "cci": "cci_20", "cci_20": "cci_20",
+    "bb_pctb": "bb_pctb_20", "bb_pctb_20": "bb_pctb_20", "bollinger": "bb_pctb_20",
+    "boll": "bb_pctb_20", "%b": "bb_pctb_20", "macd": "macd_hist", "macd_hist": "macd_hist",
+    "roc": "roc_10", "roc_10": "roc_10", "roc_20": "roc_20", "vwap": "vwap_dist_20",
+    "vwap_dist_20": "vwap_dist_20", "obv": "obv_slope_14", "obv_slope_14": "obv_slope_14",
+    "keltner": "keltner_pos_20", "keltner_pos_20": "keltner_pos_20",
+    "supertrend": "supertrend_10", "supertrend_10": "supertrend_10",
+    "sma_dist_200": "sma_dist_200", "atr_pct_14": "atr_pct_14", "bb_width_20": "bb_width_20",
+    "rsi_21": "rsi_21",
 }
 
 
@@ -73,6 +110,15 @@ def canon_metric(name: str) -> str:
     if n in _METRIC_ALIASES:
         return _METRIC_ALIASES[n]
     return n if re.match(r"rsi_(5m|15m|30m|1h|4h|1d)$", n) else ""
+
+
+def metrics_help() -> str:
+    """Compact catalogue of alarm-able metrics + their overbought/oversold levels (for the LLM)."""
+    osc = ", ".join(f"{k} (overbought≥{ob:g}/oversold≤{os_:g})" for k, (ob, os_) in _OSC.items())
+    other = "funding, ls (long/short), oi_change, change_24h, trend, vol_z, price, atr, " \
+            "macd_hist, roc_10, vwap_dist_20, obv_slope_14, keltner_pos_20, supertrend_10, " \
+            "rsi_5m/rsi_1h/rsi_4h/rsi_1d"
+    return f"bounded oscillators: {osc}. other metrics (use explicit numbers): {other}"
 
 
 def _word(phrase: str, low: str) -> bool:
@@ -94,10 +140,12 @@ def nl_to_composite(text: str):
         mode, table = "buy", MODE_BUY
     else:
         return None
-    named, seen, recognized = [], set(), False
-    for phrase, canon in _METRIC_PHRASES:           # named metrics (longest-first, word-bounded, deduped)
-        if _word(phrase, low):
+    named, seen, recognized, work = [], set(), False, low
+    for phrase, canon in _METRIC_PHRASES:           # longest-first, word-bounded, span-CONSUMED
+        mm = re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", work)
+        if mm:
             recognized = True                        # the user DID name a metric (even if not valid here)
+            work = work[:mm.start()] + " " + work[mm.end():]   # consume so "stoch" can't re-match "stoch rsi"
             if canon in table and canon not in seen:
                 named.append(canon)
                 seen.add(canon)
@@ -135,6 +183,8 @@ def validate_conditions(spec):
             v = float(c.get("value"))
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(v):              # reject NaN/inf (a NaN rule never fires; inf<x always does)
+            continue
         if m and op in _OPS:
             out.append({"metric": m, "op": op, "value": v})
     if not out:
@@ -145,68 +195,74 @@ def validate_conditions(spec):
 
 
 def resolve_metric(snapshot: dict, name: str):
-    """Current value of a named metric from the snapshot (or None if unknown/missing)."""
+    """Current value of a named metric from the snapshot (or None if unknown/missing).
+    Resolves the curated snapshot fields AND the full indicator battery (snapshot['indicators']:
+    mfi_14, bb_pctb_20, stoch_14, cci_20, williams_14, macd_hist, ...)."""
     t = snapshot.get("technicals", {})
     v = snapshot.get("volume", {})
     f = snapshot.get("futures", {})
     mt = snapshot.get("multi_tf", {})
-    name = name.lower().strip()
+    ind = snapshot.get("indicators", {}) or {}
+    name = canon_metric(name) or (name or "").lower().strip()
     direct = {
         "price": snapshot.get("price"),
         "rsi": t.get("rsi_14"), "rsi_14": t.get("rsi_14"),
         "ret_1m": t.get("ret_1m_pct"), "ret_5m": t.get("ret_5m_pct"), "ret_1h": t.get("ret_1h_pct"),
-        "change_24h": t.get("change_24h_pct"), "change": t.get("change_24h_pct"),
-        "range_pos": t.get("range_position_pct"), "range": t.get("range_position_pct"),
-        "atr": t.get("atr_pct"), "trend": t.get("ema_trend_pct"), "ema_trend": t.get("ema_trend_pct"),
+        "change_24h": t.get("change_24h_pct"),
+        "range_pos": t.get("range_position_pct"),
+        "atr": t.get("atr_pct"), "trend": t.get("ema_trend_pct"),
         "high_24h": t.get("high_24h"), "low_24h": t.get("low_24h"),
-        "vol_z": v.get("z"), "volume_z": v.get("z"), "vol_surge": v.get("surge_x"),
+        "vol_z": v.get("z"), "vol_surge": v.get("surge_x"),
         "funding": f.get("funding_rate_pct"), "oi_change": f.get("oi_change_24h_pct"),
-        "ls": f.get("long_short_ratio"), "long_short": f.get("long_short_ratio"),
-        "longshort": f.get("long_short_ratio"),
+        "ls": f.get("long_short_ratio"),
     }
-    if name in direct:
+    if direct.get(name) is not None:
         return direct[name]
+    if name in ind:                              # full battery (mfi_14, bb_pctb_20, stoch_14, ...)
+        return ind[name]
     mtf = re.match(r"rsi_(5m|15m|30m|1h|4h|1d)$", name)
     if mtf and mtf.group(1) in mt:
         return mt[mtf.group(1)].get("rsi_14")
-    return None
+    return direct.get(name)                      # known-but-currently-None (e.g. futures missing)
 
 
-def evaluate(rules: list, snapshot: dict) -> list:
-    """Return [(rule, info)] for rules that fire NOW; mutates each rule's 'armed' flag
-    (fire once per crossing, re-arm when the condition clears).
+def evaluate(rules: list, snapshot: dict, *, now: float | None = None,
+             cooldown_s: float = 0) -> list:
+    """Return [(rule, info)] for rules that fire NOW; mutates each rule's 'armed'/'last_fired'.
 
-    A rule is either SINGLE ({metric, op, value} -> info is the metric value) or COMPOSITE
-    ({conditions:[...], match:'all'|'any'} -> info is [(cond, value, met)] per condition).
-    A composite fires when all (match='all', the default) / any (match='any') conditions hold."""
+    Fire once per crossing, re-arm when the condition clears. ``cooldown_s`` (with ``now``)
+    additionally throttles re-fires: an armed rule whose condition crosses again can't fire
+    until ``cooldown_s`` has elapsed since its last fire — so a value oscillating around the
+    bar pings at most once per cooldown. cooldown_s=0 (default) preserves the old behaviour.
+
+    A rule is SINGLE ({metric, op, value} -> info is the value) or COMPOSITE
+    ({conditions:[...], match:'all'|'any'} -> info is [(cond, value, met)])."""
     fired = []
     for r in rules:
         conds = r.get("conditions")
         if conds:                                          # composite (multi-metric) alarm
-            rows = []
-            for c in conds:
-                v = resolve_metric(snapshot, c["metric"])
-                met = v is not None and _OPS.get(c["op"], lambda a, b: False)(v, c["value"])
-                rows.append((c, v, met))
+            rows = [(c, resolve_metric(snapshot, c["metric"])) for c in conds]
+            rows = [(c, v, v is not None and _OPS.get(c["op"], lambda a, b: False)(v, c["value"]))
+                    for c, v in rows]
             flags = [m for _c, _v, m in rows]
-            avail = all(v is not None for _c, v, _m in rows)   # is the data even there?
-            hit = (all(flags) if r.get("match", "all") != "any" else any(flags)) if flags else False
-            if hit and r.get("armed", True):
+            cleared_ok = all(v is not None for _c, v, _m in rows)   # data present? (else hold)
+            met = (all(flags) if r.get("match", "all") != "any" else any(flags)) if flags else False
+            info = rows
+        else:                                              # single-metric trigger
+            val = resolve_metric(snapshot, r["metric"])
+            if val is None:
+                continue                                   # missing data -> skip, hold state
+            met = _OPS.get(r["op"], lambda a, b: False)(val, r["value"])
+            info, cleared_ok = val, True
+        if met:
+            lf = r.get("last_fired")
+            cooled = (cooldown_s <= 0 or now is None or lf is None or (now - lf) >= cooldown_s)
+            if r.get("armed", True) and cooled:
                 r["armed"] = False
-                fired.append((r, rows))
-            elif not hit and avail:                            # genuine clear -> re-arm
-                r["armed"] = True
-            # else: a data gap (some metric None) -> hold state, never re-arm on missing data
-            #       (mirrors single-metric `continue`, so a futures hiccup can't cause re-fire spam)
-            continue
-        val = resolve_metric(snapshot, r["metric"])        # single-metric trigger
-        if val is None:
-            continue
-        cond = _OPS.get(r["op"], lambda a, b: False)(val, r["value"])
-        if cond and r.get("armed", True):
-            r["armed"] = False
-            fired.append((r, val))
-        elif not cond:
+                if now is not None:
+                    r["last_fired"] = now
+                fired.append((r, info))
+        elif cleared_ok:                                   # genuine clear -> re-arm
             r["armed"] = True
     return fired
 
@@ -224,6 +280,13 @@ def fired_text(rule: dict, info) -> str:
         return f"🔔 *Alarm fired* — {label}  (#{rid})\n" + "\n".join(lines)
     return (f"🔔 *Trigger fired* — `{rule['metric']} {rule['op']} {rule['value']}`  →  "
             f"now `{info:g}`   (#{rid})")
+
+
+def ack_keyboard(rule_id) -> dict:
+    """Inline keyboard attached to a fired alarm: acknowledge ('✓ Seen' -> snooze) or delete it."""
+    return {"inline_keyboard": [[
+        {"text": "✓ Seen", "callback_data": f"ack:{rule_id}"},
+        {"text": "🗑 Delete", "callback_data": f"del:{rule_id}"}]]}
 
 
 def describe_rule(rule: dict) -> str:

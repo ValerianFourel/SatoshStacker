@@ -42,9 +42,12 @@ _HELP = (
     "`/news` — BTC headlines + Fear&Greed (day/week/month)\n"
     "`/alert <metric> <op> <value>` — custom trigger, e.g. `/alert rsi > 70` "
     "(or _ping me when rsi above 70_) · `/alerts` · `/delalert <id>`\n"
-    "`/alarm <plain text>` — multi-metric alarm, e.g. _alarm me when rsi, funding & range "
-    "are in sell mode_ (fires when *all* of them flip together) · or just _tell me when "
-    "those 3 metrics go into buy mode_\n"
+    "`/alarm <plain text>` — multi-metric alarm in plain English, e.g. _alarm me when rsi, "
+    "mfi & boll %b are overbought_ (fires when *all* flip together; says 'any' for OR). Knows "
+    "rsi · mfi · stoch · stoch rsi · williams · cci · bollinger %b · macd · funding · oi · "
+    "long/short · range · trend · price. Explicit numbers work too: _rsi above 75 and macd below 0_.\n"
+    "          Each fired alarm has a *✓ Seen* button (acknowledge/snooze) and *🗑 Delete*; set the "
+    "re-fire *cooldown* (anti-spam) in `/origins`.\n"
     "`/search <query>` — search the web, read the top articles, summarize\n"
     "`/sensitivity [low|normal|high]` — how easily I alert (low = fewest) · `/mute` · `/unmute`\n"
     "`/notes` — list scratch files · `/get <file>` — read one\n"
@@ -356,7 +359,8 @@ class TelegramListener:
         cur.update(changes)
         return write_prefs(self.cfg.prefs_path, sensitivity=cur["sensitivity"], muted=cur["muted"],
                            overrides=cur["overrides"], disabled=cur["disabled"],
-                           confluence=cur["confluence"], cadence=cur["cadence"])
+                           confluence=cur["confluence"], cadence=cur["cadence"],
+                           alarm_cooldown=cur["alarm_cooldown"])
 
     def _digest_text(self) -> str:
         """Show the latest autonomous news digest (the cached copy the monitor keeps)."""
@@ -418,21 +422,28 @@ class TelegramListener:
         sensitivity/mute). The confirmation lists the exact conditions so 'those 3 metrics' is
         transparent — the operator sees which metrics & thresholds were chosen."""
         from .alerts import nl_to_composite, validate_conditions
-        raw = nl_to_composite(text)
-        comp = validate_conditions(raw) if raw else None
-        if comp and len(comp["conditions"]) >= 2:
-            r = self.alerts.add_composite(comp["conditions"], comp.get("match", "all"),
-                                          comp.get("label", ""))
+        spec = None
+        if hasattr(self.analyst, "parse_alarm"):       # 1) LLM — complex / free-form / explicit numbers
+            try:
+                spec = validate_conditions(self.analyst.parse_alarm(
+                    text, snap, history=self.memory.recent_chat()))
+            except Exception:  # noqa: BLE001 - never let the parser crash the handler
+                spec = None
+        if not spec:                                   # 2) deterministic 'sell/buy mode' parser
+            spec = validate_conditions(nl_to_composite(text))
+        if spec and len(spec["conditions"]) >= 2:
+            r = self.alerts.add_composite(spec["conditions"], spec.get("match", "all"),
+                                          spec.get("label", ""))
             return self._confirm_alarm(r)
-        rule = _nl_to_rule(text)                       # single-metric ("ping me when rsi above 70")
+        if spec and spec["conditions"]:                # a single resolved condition -> single rule
+            c = spec["conditions"][0]
+            return self._add_alert(f"{c['metric']} {c['op']} {c['value']}", snap)
+        rule = _nl_to_rule(text)                       # 3) plain single-metric ("ping me when rsi above 70")
         if rule:
             return self._add_alert(f"{rule[0]} {rule[1]} {rule[2]}", snap)
-        if comp and comp["conditions"]:                # a one-condition mode request still works
-            c = comp["conditions"][0]
-            return self._add_alert(f"{c['metric']} {c['op']} {c['value']}", snap)
-        return ("tell me like: _alarm me when rsi, funding & range are in sell mode_ · "
-                "_ping me when rsi above 70_ · or `/alert rsi > 70`.\n"
-                "_(in sell mode = overbought/frothy; buy mode = oversold/washed-out)_")
+        return ("tell me like: _alarm me when rsi, mfi & boll %b are overbought_ · "
+                "_ping me when rsi above 70_ · or `/alert mfi > 80`.\n"
+                "_(overbought / sell mode = stretched up; oversold / buy mode = washed out)_")
 
     def _confirm_alarm(self, rule: dict) -> str:
         from .alerts import describe_rule
@@ -443,14 +454,16 @@ class TelegramListener:
                 f"`/delalert {rule['id']}` to remove.")
 
     def _add_alert(self, spec: str, snap) -> str:
-        from .alerts import SUPPORTED, parse_rule, resolve_metric
+        from .alerts import SUPPORTED, canon_metric, parse_rule
         p = parse_rule(spec)
         if not p:
             return ("format: `/alert <metric> <op> <value>` — e.g. `/alert rsi > 70`\n"
                     f"metrics: {SUPPORTED}")
         metric, op, value = p
-        if snap and resolve_metric(snap, metric) is None:
+        canon = canon_metric(metric)                   # accept the full battery; valid even pre-warmup
+        if not canon:
             return f"unknown metric `{metric}`.\nmetrics: {SUPPORTED}"
+        metric = canon
         r = self.alerts.add(metric, op, value)
         return (f"✅ trigger *#{r['id']}* set: `{metric} {op} {value}` — I'll ping each time it "
                 f"crosses. `/alerts` to list · `/delalert {r['id']}` to remove.")
@@ -493,6 +506,9 @@ class TelegramListener:
         if self.chat_ids and chat not in self.chat_ids:
             self._tg_api("answerCallbackQuery", {"callback_query_id": cbid})
             return
+        if data.startswith("ack:") or data.startswith("del:"):   # a fired-alarm button
+            self._handle_alarm_button(data, msg, cbid)
+            return
         if data == "og:x":                              # close -> drop the keyboard
             self._tg_api("editMessageReplyMarkup", {"chat_id": chat, "message_id": mid})
             self._tg_api("answerCallbackQuery", {"callback_query_id": cbid, "text": "closed"})
@@ -507,6 +523,37 @@ class TelegramListener:
             "parse_mode": "Markdown", "disable_web_page_preview": True,
             "reply_markup": keyboard(prefs)})
         self._tg_api("answerCallbackQuery", {"callback_query_id": cbid, "text": toast or ""})
+
+    def _handle_alarm_button(self, data: str, msg: dict, cbid) -> None:
+        """A fired-alarm button. '✓ Seen' snoozes the trigger (restarts its cooldown, stays
+        disarmed); '🗑 Delete' removes it. Edits the message to show the outcome + drops the
+        buttons. Edit is plain-text (no parse_mode) so re-rendering can't choke on markdown."""
+        import time
+        action, _, sid = data.partition(":")
+        chat = str((msg.get("chat") or {}).get("id", ""))
+        mid = msg.get("message_id")
+        orig = (msg.get("text") or "").strip()
+        try:
+            rid = int(sid)
+        except ValueError:
+            rid = None
+        if action == "del":
+            ok = bool(rid is not None and self.alerts.remove(rid))
+            status, toast = ("🗑 deleted" if ok else "already gone"), ("deleted" if ok else "gone")
+        else:                                    # ack -> snooze
+            rules = self.alerts.load()
+            rule = next((r for r in rules if r.get("id") == rid), None)
+            if rule is not None:
+                rule["armed"] = False
+                rule["last_fired"] = time.time()  # restart the cooldown from the moment you ack
+                self.alerts.save(rules)
+            cd = int(self._prefs_full().get("alarm_cooldown", 900)) // 60
+            status = (f"✓ Seen — snoozed (won't re-nag for ~{cd}m, and not until it clears)"
+                      if cd else "✓ Seen")
+            toast = "snoozed"
+        body = (orig + "\n\n" + status) if orig else status
+        self._tg_api("editMessageText", {"chat_id": chat, "message_id": mid, "text": body[:4000]})
+        self._tg_api("answerCallbackQuery", {"callback_query_id": cbid, "text": toast})
 
     # ── network ──
     def _process_update(self, update: dict) -> None:

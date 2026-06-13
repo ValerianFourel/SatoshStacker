@@ -224,6 +224,11 @@ def compute_metrics(*, price: float, klines_fast: list[list[float]],
         tv = _tuned_values(klines_trend, tuned)
         if tv:
             m["tuned"] = tv
+    if len(t):                              # full indicator battery (RSI/MFI/BollB/Stoch/CCI/...)
+        from .signal_tuner import latest_values
+        iv = latest_values(klines_trend)    # so alarms/questions can reference any of them
+        if iv:
+            m["indicators"] = iv
     return m
 
 
@@ -486,27 +491,30 @@ class MarketMonitor:
         self._prefs_mtime = mt
         p = read_prefs(path, default_level=self.cfg.sensitivity,
                        default_confluence=self.cfg.confluence_min,
-                       default_cadence=self.cfg.alert_cadence_s)
+                       default_cadence=self.cfg.alert_cadence_s,
+                       default_alarm_cooldown=self.cfg.alarm_cooldown_s)
         self.detector.level = p["sensitivity"]
         self.detector.muted = p["muted"]
         self.detector.overrides = p["overrides"]
         self.detector.disabled = tuple(p["disabled"])
         self.detector.confluence = p["confluence"]
         self.detector.cadence = p["cadence"]
+        self._alarm_cooldown = p["alarm_cooldown"]    # user-trigger anti-spam cooldown
 
     def _check_user_alerts(self, m: dict) -> None:
         """Evaluate user-defined trigger rules (single + composite) against the live snapshot;
         ping on fire. These are EXPLICIT operator alarms — never gated by sensitivity/mute."""
-        from .alerts import evaluate, fired_text
+        from .alerts import ack_keyboard, evaluate, fired_text
         rules = self.alerts.load()
         if not rules:
             return
-        before = [r.get("armed", True) for r in rules]
-        fired = evaluate(rules, m)
-        if before != [r.get("armed", True) for r in rules]:
-            self.alerts.save(rules)        # persist arm/disarm only when it changed
-        for rule, info in fired:
-            self.notifier.send(fired_text(rule, info))
+        before = [(r.get("armed", True), r.get("last_fired")) for r in rules]
+        fired = evaluate(rules, m, now=self.clock(),
+                         cooldown_s=getattr(self, "_alarm_cooldown", 0))
+        if before != [(r.get("armed", True), r.get("last_fired")) for r in rules]:
+            self.alerts.save(rules)        # persist arm/disarm/last_fired only when it changed
+        for rule, info in fired:           # each ping carries a ✓ Seen / 🗑 Delete button
+            self.notifier.send(fired_text(rule, info), reply_markup=ack_keyboard(rule["id"]))
 
     def _multi_tf(self, now: float) -> dict:
         """RSI(14) + EMA trend per 5m/1h/4h/1d so the LLM sees each timeframe by name.

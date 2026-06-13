@@ -151,9 +151,11 @@ class FakeNotifier:
     def __init__(self):
         self.sent = []
         self.photos = []
+        self.markups = []
 
-    def send(self, text):
+    def send(self, text, reply_markup=None):
         self.sent.append(text)
+        self.markups.append(reply_markup)
 
     def send_photo(self, png, caption=""):
         self.photos.append((png, caption))
@@ -585,7 +587,7 @@ def test_sensitivity_prefs_and_listener_commands(tmp_path):
     p = str(tmp_path / "prefs.json")
     assert read_prefs(p, default_level="normal") == {
         "sensitivity": "normal", "muted": False, "overrides": {}, "disabled": [],
-        "confluence": 2, "cadence": 1800}
+        "confluence": 2, "cadence": 1800, "alarm_cooldown": 900}
     write_prefs(p, sensitivity="high")
     assert read_prefs(p)["sensitivity"] == "high"
     write_prefs(p, muted=True)
@@ -1219,3 +1221,152 @@ def test_listener_question_with_alarm_word_is_not_an_alarm(tmp_path):
                            notifier=FakeNotifier(), snapshot_fn=lambda: snap)
     out = lis.handle_text("is this alarming, rsi is at 85?")
     assert "mock answer" in out and lis.alerts.load() == []          # answered, no alarm created
+
+
+# ── rich free-form alarms over the full indicator battery (MFI, Boll %B, Stoch, CCI, …) ──
+def test_snapshot_surfaces_indicator_battery():
+    m = compute_metrics(price=110_000.0, klines_fast=flat_fast(), klines_trend=trend_klines(),
+                        order_book=book(), cfg=WatchConfig(), now_ts=1_000.0)
+    ind = m.get("indicators", {})
+    assert "rsi_14" in ind and "mfi_14" in ind and "bb_pctb_20" in ind and "stoch_14" in ind
+
+
+def test_resolve_battery_metric_aliases():
+    from agent.alerts import resolve_metric
+    snap = {"technicals": {}, "indicators": {"mfi_14": 83.2, "bb_pctb_20": 101.0, "cci_20": 140}}
+    assert resolve_metric(snap, "mfi") == 83.2          # alias -> battery
+    assert resolve_metric(snap, "boll") == 101.0
+    assert resolve_metric(snap, "bb_pctb_20") == 101.0
+    assert resolve_metric(snap, "cci") == 140
+
+
+def test_nl_composite_full_oscillator_battery():
+    from agent.alerts import nl_to_composite, validate_conditions
+    c = validate_conditions(nl_to_composite("alert me when rsi, mfi and boll % are overbought"))
+    got = {x["metric"]: (x["op"], x["value"]) for x in c["conditions"]}
+    assert got["rsi"] == (">=", 70.0) and got["mfi_14"] == (">=", 80.0) \
+        and got["bb_pctb_20"] == (">=", 100.0)
+    # "stoch rsi" must resolve to ONE metric (span-consume), not stoch_14 + stoch_rsi_14
+    s = validate_conditions(nl_to_composite("alarm me when stoch rsi is overbought"))
+    assert [x["metric"] for x in s["conditions"]] == ["stoch_rsi_14"]
+    o = validate_conditions(nl_to_composite("ping me when cci and williams are oversold"))
+    assert {x["metric"] for x in o["conditions"]} == {"cci_20", "williams_14"}
+    assert all(x["op"] == "<=" for x in o["conditions"])
+
+
+def test_alert_accepts_battery_metric_and_stores_canonical(tmp_path):
+    cfg = WatchConfig(user_alerts_path=str(tmp_path / "a.json"), memory_path=str(tmp_path / "m.jsonl"))
+    snap = {"technicals": {}, "indicators": {"mfi_14": 50}, "futures": {}, "volume": {}}
+    lis = TelegramListener(cfg, token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: snap)
+    assert "set" in lis.handle_text("/alert mfi > 80")
+    assert lis.alerts.load()[0]["metric"] == "mfi_14"          # stored canonical, not "mfi"
+
+
+def test_listener_creates_rich_composite_alarm(tmp_path):
+    cfg = WatchConfig(user_alerts_path=str(tmp_path / "a.json"), memory_path=str(tmp_path / "m.jsonl"))
+    snap = {"technicals": {"rsi_14": 55}, "indicators": {"mfi_14": 50, "bb_pctb_20": 60},
+            "futures": {}, "volume": {}}
+    lis = TelegramListener(cfg, token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: snap)
+    out = lis.handle_text("alert me when rsi, mfi and boll % are overbought")
+    assert "Alarm set" in out and "mfi_14" in out and "bb_pctb_20" in out and "rsi >= 70" in out
+
+
+def test_llm_parse_alarm_path_validated(tmp_path):
+    # an analyst that returns a structured spec (simulating the LLM) -> validated + created
+    class _LLM(MockAnalyst):
+        def parse_alarm(self, text, m, history=None):
+            return {"conditions": [{"metric": "rsi", "op": ">=", "value": 75},
+                                   {"metric": "macd_hist", "op": "<", "value": 0},
+                                   {"metric": "bogus_metric", "op": ">", "value": 1}],  # dropped
+                    "match": "all", "label": "rsi hot + macd rolling over"}
+    cfg = WatchConfig(user_alerts_path=str(tmp_path / "a.json"), memory_path=str(tmp_path / "m.jsonl"))
+    lis = TelegramListener(cfg, token="t", chat_id="42", analyst=_LLM(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: {"technicals": {}, "indicators": {}})
+    out = lis.handle_text("alarm me when rsi is above 75 and macd rolls negative")
+    assert "Alarm set" in out
+    conds = lis.alerts.load()[0]["conditions"]
+    metrics = {c["metric"] for c in conds}
+    assert metrics == {"rsi", "macd_hist"}                     # bogus_metric validated out
+
+
+# ── alarm acknowledge button + per-trigger cooldown ──
+def test_alert_cooldown_throttles_refire():
+    from agent.alerts import evaluate
+    rules = [{"id": 1, "metric": "rsi", "op": ">", "value": 70, "armed": True}]
+    hi, lo = {"technicals": {"rsi_14": 80}}, {"technicals": {"rsi_14": 60}}
+    assert len(evaluate(rules, hi, now=0, cooldown_s=900)) == 1     # fire @0
+    evaluate(rules, lo, now=10, cooldown_s=900)                     # clears -> re-arm
+    assert evaluate(rules, hi, now=20, cooldown_s=900) == []        # re-cross @20 < cooldown -> throttled
+    evaluate(rules, lo, now=905, cooldown_s=900)                    # clears again
+    assert len(evaluate(rules, hi, now=910, cooldown_s=900)) == 1   # >900 since fire -> fires again
+
+
+def test_alert_cooldown_zero_preserves_old_behaviour():
+    from agent.alerts import evaluate
+    rules = [{"id": 1, "metric": "rsi", "op": ">", "value": 70, "armed": True}]
+    assert len(evaluate(rules, {"technicals": {"rsi_14": 80}})) == 1    # default cooldown 0, now None
+    assert evaluate(rules, {"technicals": {"rsi_14": 80}}) == []        # still high -> no spam
+    evaluate(rules, {"technicals": {"rsi_14": 60}})
+    assert len(evaluate(rules, {"technicals": {"rsi_14": 80}})) == 1    # re-arm + fire, no throttle
+
+
+def test_ack_keyboard_structure():
+    from agent.alerts import ack_keyboard
+    datas = [b["callback_data"] for row in ack_keyboard(7)["inline_keyboard"] for b in row]
+    assert datas == ["ack:7", "del:7"]
+
+
+def test_monitor_attaches_ack_keyboard_to_fired_alarm(tmp_path):
+    from agent.alerts import AlertStore
+    apath = str(tmp_path / "a.json")
+    AlertStore(apath).add("rsi", ">", 70, clock=lambda: 0.0)
+    cfg = WatchConfig(snapshot_path=str(tmp_path / "s.json"), state_path=str(tmp_path / "st.json"),
+                      user_alerts_path=apath, tuned_signals_path=str(tmp_path / "none.json"),
+                      daily_update_tzs=(), alert_charts=False, prefs_path=str(tmp_path / "p.json"))
+    note = FakeNotifier()
+    mon = MarketMonitor(cfg, notifier=note, analyst=MockAnalyst(), price_fn=lambda: 1,
+                        klines_fn=lambda a, b: [], book_fn=lambda: {}, ticker_fn=lambda: None,
+                        funding_fn=lambda: None, clock=lambda: 0.0)
+    mon._check_user_alerts({"technicals": {"rsi_14": 80}})
+    assert any("Trigger fired" in s for s in note.sent)
+    datas = [b["callback_data"] for row in note.markups[-1]["inline_keyboard"] for b in row]
+    assert "ack:1" in datas and "del:1" in datas
+
+
+def test_listener_alarm_ack_snoozes_and_delete_removes(tmp_path, monkeypatch):
+    class _R:
+        def json(self):
+            return {"ok": True}
+    monkeypatch.setattr("requests.post", lambda url, **k: _R())
+    from agent.alerts import AlertStore
+    apath = str(tmp_path / "a.json")
+    store = AlertStore(apath)
+    r = store.add("rsi", ">", 70, clock=lambda: 0.0)
+    cfg = WatchConfig(user_alerts_path=apath, prefs_path=str(tmp_path / "p.json"),
+                      memory_path=str(tmp_path / "m.jsonl"))
+    lis = TelegramListener(cfg, token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: {})
+    msg = {"chat": {"id": 42}, "message_id": 9, "text": "BTC alert fired rsi > 70"}
+    lis._handle_callback({"id": "1", "data": f"ack:{r['id']}", "message": msg})
+    ro = store.load()[0]
+    assert ro["armed"] is False and ro.get("last_fired") is not None        # snoozed
+    # a stranger cannot delete
+    lis._handle_callback({"id": "2", "data": f"del:{r['id']}",
+                          "message": {"chat": {"id": 999}, "message_id": 9, "text": "x"}})
+    assert len(store.load()) == 1
+    # operator delete removes it
+    lis._handle_callback({"id": "3", "data": f"del:{r['id']}", "message": msg})
+    assert store.load() == []
+
+
+def test_origins_alarm_cooldown_control():
+    from agent.origins import apply_callback, keyboard, widget_text
+    prefs = {"sensitivity": "low", "muted": False, "overrides": {}, "disabled": [],
+             "confluence": 2, "cadence": 1800, "alarm_cooldown": 900}
+    assert "alarm cooldown" in widget_text(prefs).lower()
+    flat = [b["callback_data"] for row in keyboard(prefs)["inline_keyboard"] for b in row]
+    assert "og:a:+" in flat and "og:a:-" in flat
+    assert apply_callback("og:a:+", prefs)[0]["alarm_cooldown"] == 1200    # +5 min
+    assert apply_callback("og:a:-", prefs)[0]["alarm_cooldown"] == 600     # -5 min

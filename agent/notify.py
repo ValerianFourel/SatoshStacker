@@ -22,7 +22,7 @@ class Notifier:
         """One or more chat ids (comma-separated) — broadcast to each."""
         return [c.strip() for c in (self.chat_id or "").split(",") if c.strip()]
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, reply_markup: dict | None = None) -> None:
         from .secrets import redact
         text = redact(text)  # scrub any credential before it reaches a log/stdout/Telegram
         chats = self._chat_ids()
@@ -33,11 +33,13 @@ class Notifier:
         for cid in chats:
             try:
                 import requests
+                body = {"chat_id": cid, "text": text,
+                        "parse_mode": "Markdown", "disable_web_page_preview": True}
+                if reply_markup:                      # inline keyboard (e.g. an alarm's ✓ Seen button)
+                    body["reply_markup"] = reply_markup
                 requests.post(
                     f"https://api.telegram.org/bot{self.token}/sendMessage",
-                    json={"chat_id": cid, "text": text,
-                          "parse_mode": "Markdown", "disable_web_page_preview": True},
-                    timeout=10)
+                    json=body, timeout=10)
             except Exception as e:  # noqa: BLE001 - never let notifications break the loop
                 log.warning("telegram send failed: %s", e)
                 print(f"[notify-fallback] {text}")

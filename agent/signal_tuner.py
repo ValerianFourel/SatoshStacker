@@ -239,6 +239,25 @@ def compute_one(name: str, o, h, l, c, v) -> np.ndarray:
     return battery(o, h, l, c, v).get(name, np.full(len(c), np.nan))
 
 
+def latest_values(klines: list) -> dict:
+    """Current (last finite) value of every battery indicator, for the live snapshot — so
+    alarms/questions can reference RSI, MFI, Boll %B, Stoch, CCI, Williams %R, MACD, etc.
+    Returns {} on too-little data; per-indicator skipped when all-NaN (warmup)."""
+    try:
+        a = np.asarray(klines, dtype=float)
+    except Exception:  # noqa: BLE001
+        return {}
+    if a.ndim != 2 or a.shape[0] < 3 or a.shape[1] < 6:
+        return {}
+    o, h, l, c, v = a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5]
+    out = {}
+    for name, series in battery(o, h, l, c, v).items():
+        fin = series[~np.isnan(series)]
+        if len(fin):
+            out[name] = round(float(fin[-1]), 4)
+    return out
+
+
 # ───────────────────────────── labelling + scoring ──────────────────────────
 
 def label_extrema(h, l, w: int):

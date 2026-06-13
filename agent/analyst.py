@@ -138,6 +138,7 @@ def _features(m: dict) -> dict:
         "order_book": m.get("order_book"),
         "futures": m.get("futures"),
         "tuned_signals": m.get("tuned"),
+        "indicators": m.get("indicators"),         # full battery: mfi/boll%b/stoch/cci/williams/macd…
         "stacking_levels": _stacking_levels(m),   # structural reentry/sell zones
         "onchain": m.get("onchain") or None,       # MVRV/NUPL/SOPR/netflow (cycle-level)
         "events_fired": m.get("events"),
@@ -184,6 +185,9 @@ class MockAnalyst:
     def news_digest(self, m: dict) -> str:
         return "QUIET: [mock] no significant news"
 
+    def parse_alarm(self, text: str, m: dict, history=None):
+        return None        # tests fall back to the deterministic parser
+
 
 class LLMAnalyst:
     """Qwen (OpenAI-compatible) read-only analyst. Fail-safe to numeric summary."""
@@ -217,14 +221,14 @@ class LLMAnalyst:
                 out.append(names)
         return out
 
-    def _llm(self, payload: dict) -> dict | None:
+    def _llm(self, payload: dict, *, system: str | None = None) -> dict | None:
         """One raw LLM call -> parsed JSON dict (or {'reply': prose}); None on error."""
         try:
             from openai import OpenAI  # lazy
             client = OpenAI(base_url=self.cfg.base_url, api_key=self._api_key)
             resp = client.chat.completions.create(
                 model=self.cfg.model,
-                messages=[{"role": "system", "content": _SYSTEM},
+                messages=[{"role": "system", "content": system or _SYSTEM},
                           {"role": "user", "content": json.dumps(payload)}],
                 temperature=0.2,
                 timeout=self.cfg.request_timeout_s,
@@ -233,7 +237,8 @@ class LLMAnalyst:
             )
             raw = resp.choices[0].message.content or ""
             try:
-                return json.loads(raw)
+                # reject non-standard NaN/Infinity tokens (a NaN alarm threshold never fires)
+                return json.loads(raw, parse_constant=lambda _c: None)
             except Exception:  # noqa: BLE001 - model returned prose, wrap it
                 return {"reply": raw.strip()}
         except Exception as e:  # noqa: BLE001 - never crash the bot
@@ -339,6 +344,27 @@ class LLMAnalyst:
             "yes, otherwise 'QUIET:'. Be conservative — only ALERT on genuinely market-moving "
             "news (ETF flows, regulation, macro shocks, large liquidations, hacks).")}
         return self._respond(payload, fallback="QUIET: news read unavailable")
+
+    def parse_alarm(self, text: str, m: dict, history=None):
+        """Translate a free-form alarm request into a structured composite spec
+        {conditions:[{metric,op,value}], match, label} — or None. The CALLER validates the
+        output (validate_conditions), so a hallucinated metric/op is dropped safely."""
+        if not self._api_key:
+            return None
+        from .alerts import metrics_help
+        sysmsg = (
+            "You convert a trader's natural-language BTC alarm request into STRICT JSON and "
+            "nothing else: {\"conditions\":[{\"metric\":\"<name>\",\"op\":\">=|<=|>|<|=\","
+            "\"value\":<number>}],\"match\":\"all|any\",\"label\":\"<short label>\"}. "
+            "Use ONLY these metric names: " + metrics_help() + ". Map 'overbought'/'in sell "
+            "mode'/'frothy' to `>=` the metric's overbought level; 'oversold'/'in buy mode'/"
+            "'washed out' to `<=` its oversold level. Honor explicit numbers/operators when "
+            "given (e.g. 'rsi above 75' -> rsi >= 75). match='any' only if the user says "
+            "any/either; else 'all'. Drop metrics not in the list. If it is not an alarm "
+            "request, return {\"conditions\":[]}.")
+        payload = {"request": text[:400], "recent_conversation": (history or [])[-6:]}
+        d = self._llm(payload, system=sysmsg)
+        return d if isinstance(d, dict) else None
 
     def pick_indicators(self, m: dict, question: str | None = None) -> list:
         """Ask the LLM which up-to-3 indicators to chart (honouring ``question`` if given)."""

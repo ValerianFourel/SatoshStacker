@@ -8,7 +8,8 @@ Pure here (text + keyboard + a prefs mutation from a button tap); the Telegram I
 """
 from __future__ import annotations
 
-from .sensitivity import CADENCE_RANGE_S, CONFLUENCE_RANGE, ORDER, _clamp
+from .sensitivity import (ALARM_COOLDOWN_RANGE_S, CADENCE_RANGE_S, CONFLUENCE_RANGE, ORDER,
+                          _clamp)
 
 # canonical Signal.name -> (emoji, short label). These are the "origins" of proactive
 # alerts; toggling one adds/removes it from prefs['disabled'].
@@ -26,7 +27,8 @@ ORIGINS = [
 _LABEL = {c: l for c, _e, l in ORIGINS}
 
 CADENCE_STEP_S = 300       # ± 5 min per tap
-_KEYS = ("sensitivity", "muted", "overrides", "disabled", "confluence", "cadence")
+_KEYS = ("sensitivity", "muted", "overrides", "disabled", "confluence", "cadence",
+         "alarm_cooldown")
 
 # callback_data scheme (all < 64 bytes): og:<action>[:<arg>]
 P = "og"
@@ -41,6 +43,7 @@ def widget_text(prefs: dict) -> str:
     The per-origin on/off state is shown on the buttons themselves."""
     conf = max(1, int(prefs.get("confluence", 2)))
     cad_m = int(prefs.get("cadence", 1800)) // 60
+    acd_m = int(prefs.get("alarm_cooldown", 900)) // 60
     level = prefs.get("sensitivity", "low")
     muted = bool(prefs.get("muted", False))
     disabled = prefs.get("disabled") or []
@@ -49,7 +52,8 @@ def widget_text(prefs: dict) -> str:
     lines = [
         "🛰️ *Update controls* — what pings you, and how often",
         f"🧩 Confluence: {conf_line}",
-        f"⏱️ Cadence: at most *1 ping / {cad_m}m*",
+        f"⏱️ Cadence: at most *1 ping / {cad_m}m* (proactive)",
+        f"🔔 Alarm cooldown: " + (f"*{acd_m}m* between re-fires of a trigger" if acd_m else "*off*"),
         f"🎚️ Sensitivity bars: {_preset_label(level)}   "
         + ("🔇 *muted*" if muted else "🔔 live"),
     ]
@@ -62,6 +66,7 @@ def keyboard(prefs: dict) -> dict:
     """Telegram inline_keyboard dict reflecting the current prefs."""
     conf = max(1, int(prefs.get("confluence", 2)))
     cad_m = int(prefs.get("cadence", 1800)) // 60
+    acd_m = int(prefs.get("alarm_cooldown", 900)) // 60
     level = prefs.get("sensitivity", "low")
     muted = bool(prefs.get("muted", False))
     disabled = set(prefs.get("disabled") or [])
@@ -71,7 +76,8 @@ def keyboard(prefs: dict) -> dict:
 
     rows = [
         [btn("➖", f"{P}:c:-"), btn(f"🧩 confluence ≥{conf}", f"{P}:r"), btn("➕", f"{P}:c:+")],
-        [btn("➖", f"{P}:d:-"), btn(f"⏱️ {cad_m} min", f"{P}:r"), btn("➕", f"{P}:d:+")],
+        [btn("➖", f"{P}:d:-"), btn(f"⏱️ cadence {cad_m}m", f"{P}:r"), btn("➕", f"{P}:d:+")],
+        [btn("➖", f"{P}:a:-"), btn(f"🔔 alarm cooldown {acd_m}m", f"{P}:r"), btn("➕", f"{P}:a:+")],
     ]
     # origin toggles, two per row
     pair = []
@@ -96,6 +102,7 @@ def apply_callback(data: str, prefs: dict) -> tuple[dict | None, str]:
     p["disabled"] = list(p.get("disabled") or [])
     p["confluence"] = max(1, int(p.get("confluence", 2)))
     p["cadence"] = int(p.get("cadence", 1800))
+    p["alarm_cooldown"] = int(p.get("alarm_cooldown", 900))
     parts = (data or "").split(":")
     if len(parts) < 2 or parts[0] != P:
         return None, ""
@@ -123,6 +130,11 @@ def apply_callback(data: str, prefs: dict) -> tuple[dict | None, str]:
         p["cadence"] = _clamp(p["cadence"] + (CADENCE_STEP_S if parts[-1] == "+"
                                               else -CADENCE_STEP_S), *CADENCE_RANGE_S)
         return p, f"⏱️ 1 ping / {p['cadence'] // 60}m"
+    if action == "a":
+        p["alarm_cooldown"] = _clamp(p["alarm_cooldown"] + (CADENCE_STEP_S if parts[-1] == "+"
+                                     else -CADENCE_STEP_S), *ALARM_COOLDOWN_RANGE_S)
+        m = p["alarm_cooldown"] // 60
+        return p, (f"🔔 alarm cooldown {m}m" if m else "🔔 alarm cooldown off")
     if action == "p":
         i = ORDER.index(p["sensitivity"]) if p.get("sensitivity") in ORDER else 0
         p["sensitivity"] = ORDER[(i + 1) % len(ORDER)]
