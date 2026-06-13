@@ -166,6 +166,7 @@ class WatchConfig:
     convo_max_turns: int = 12       # ...and at most this many recent turns
     user_alerts_path: str = "state/user_alerts.json"  # custom trigger rules
     data_retention_days: int = 90   # prune any pulled-data files older than this
+    fee_pct: float = 0.1            # Binance spot fee per leg, % (0.075 w/ BNB; lower at VIP)
 
     @staticmethod
     def from_env() -> "WatchConfig":
@@ -201,6 +202,7 @@ class WatchConfig:
                 "WATCH_DAILY_TZS", "America/New_York,Asia/Seoul").split(",") if z.strip()),
             convo_ttl_s=_i("WATCH_CONVO_TTL_S", 86_400),
             data_retention_days=_i("WATCH_DATA_RETENTION_DAYS", 90),
+            fee_pct=_f("WATCH_FEE_PCT", 0.1),
         )
 
 

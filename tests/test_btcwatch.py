@@ -481,6 +481,39 @@ def test_derivs_chart_renders():
     assert "derivatives" in cap.lower() and "Coinglass" in cap
 
 
+def test_levels_target_scales_with_fees_and_spread():
+    from agent.levels import suggest_levels
+    m = {"price": 60000, "technicals": {"atr_pct": 1.0, "low_24h": 59000, "high_24h": 61000,
+                                        "low_7d": 57000, "high_7d": 63000},
+         "order_book": {"spread_bps": 2.0}}        # 0.02% spread
+    tg = suggest_levels(m, target_pct=1.0, fee_pct=0.1)["target"]
+    assert abs(tg["cost_pct"] - 0.22) < 1e-6        # 2*0.1 fee + 0.02 spread
+    assert abs(tg["gross_pct"] - 1.22) < 1e-6       # target + cost
+    assert tg["sell"] > tg["buy"]
+    assert abs(tg["sell"] / tg["buy"] - 1.0122) < 1e-3
+    # a bigger target -> a wider buy/sell gap
+    tg3 = suggest_levels(m, target_pct=3.0, fee_pct=0.1)["target"]
+    assert tg3["sell"] - tg3["buy"] > tg["sell"] - tg["buy"]
+    assert "target" not in suggest_levels(m)        # no target -> no block (back-compat)
+
+
+def test_levels_text_shows_target_and_parser():
+    from agent.levels import levels_text
+    from agent.telegram_listener import _parse_target_pct
+    m = {"price": 60000, "technicals": {"atr_pct": 1.0, "low_24h": 59000, "high_24h": 61000},
+         "order_book": {"spread_bps": 2.0}}
+    txt = levels_text(m, target_pct=1.0, fee_pct=0.1)
+    assert "1% net" in txt and "Buy" in txt and "Sell" in txt and "fees" in txt
+    assert "want" not in levels_text(m).lower()      # no target -> structural only
+    assert _parse_target_pct("/levels 1", allow_bare=True) == 1.0
+    assert _parse_target_pct("/levels 0.5%", allow_bare=True) == 0.5
+    assert _parse_target_pct("/levels", allow_bare=True) is None
+    assert _parse_target_pct("i want a reentry and sell for about 2%") == 2.0
+    assert _parse_target_pct("give me a sell price, i want 1.5 percent") == 1.5
+    assert _parse_target_pct("reentry price please") is None
+    assert _parse_target_pct("/levels 999", allow_bare=True) is None   # absurd -> ignored
+
+
 def test_onchain_text_status():
     from agent.onchain import onchain_text
     assert "unavailable" in onchain_text({})                 # no plan access -> honest status

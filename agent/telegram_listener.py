@@ -27,7 +27,8 @@ _HELP = (
     "`/raw` — just the numbers, no LLM\n"
     "`/chart` — price + the leading indicators, plotted\n"
     "`/derivs` (or `/liq`) — funding · open interest · long/short · taker flow\n"
-    "`/levels` — good reentry (buy) & sell zones for stacking sats\n"
+    "`/levels [%]` — reentry & sell zones; add a target (e.g. `/levels 1`) to scale a\n"
+    "          buy→sell pair that nets ~that % after Binance fees + spread\n"
     "`/onchain` — MVRV · NUPL · SOPR · netflow (CryptoQuant)\n"
     "`/news` — BTC headlines + Fear&Greed (day/week/month)\n"
     "`/alert <metric> <op> <value>` — custom trigger, e.g. `/alert rsi > 70` "
@@ -83,6 +84,24 @@ def _parse_search_dates(text: str):
     text = _AFTER.sub("", text)
     text = _BEFORE.sub("", text)
     return re.sub(r"\s+", " ", text).strip(), after, before
+
+
+def _parse_target_pct(text: str, *, allow_bare: bool = False) -> float | None:
+    """Pull a target margin out of a levels request: '1%', '0.5 percent', 'want 2'.
+    With allow_bare (the /levels command path) also accepts a trailing bare number."""
+    for pat in (r"(\d+(?:\.\d+)?)\s*%",
+                r"(\d+(?:\.\d+)?)\s*(?:percent|pct)\b",
+                r"(?:want|expect|target|net|margin|profit|gain|make|around|about|~)\s*\$?"
+                r"(\d+(?:\.\d+)?)"):
+        m = re.search(pat, text)
+        if m:
+            break
+    else:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*$", text.strip()) if allow_bare else None
+    if not m:
+        return None
+    v = float(m.group(1))
+    return v if 0 < v <= 50 else None       # sane bound; ignore absurd inputs
 
 
 _DIR_DN = ("below", "under", "drops", "falls", "less than", "lower", "crosses below", "<")
@@ -144,9 +163,12 @@ class TelegramListener:
             png, cap = build_derivs_chart(self.cfg)
             self.notifier.send_photo(png, cap)
             return ""
-        if low in ("/levels", "/entry", "/sell", "/buy"):
+        if low.split(" ", 1)[0] in ("/levels", "/entry", "/sell", "/buy"):
             from .levels import levels_text
-            return levels_text(snap) if snap else "no snapshot yet — warming up"
+            if not snap:
+                return "no snapshot yet — warming up"
+            return levels_text(snap, target_pct=_parse_target_pct(low, allow_bare=True),
+                               fee_pct=self.cfg.fee_pct)
         if low in ("/onchain", "/mvrv", "/sopr", "/nupl"):
             from .onchain import onchain_text
             return onchain_text((snap or {}).get("onchain") or {})
@@ -190,7 +212,8 @@ class TelegramListener:
                                   "sell price", "buy price", "good buy", "good sell",
                                   "where to buy", "where to sell", "add sats")):
             from .levels import levels_text
-            return levels_text(snap)
+            return levels_text(snap, target_pct=_parse_target_pct(low),
+                               fee_pct=self.cfg.fee_pct)
         # natural-language trigger: "ping me when rsi above 70"
         if any(p in low for p in ("ping me when", "alert me when", "notify me when",
                                   "let me know when", "tell me when")):
