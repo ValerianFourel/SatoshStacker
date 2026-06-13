@@ -86,12 +86,16 @@ class TelegramListener:
         from .secrets import clean_secret
         self.cfg = cfg
         self.token = clean_secret(token)
-        self.chat_id = clean_secret(chat_id)
+        # chat_id may be a comma-separated ALLOWLIST (operator + shared users)
+        self.chat_ids = {c.strip() for c in clean_secret(chat_id).split(",") if c.strip()}
         self.analyst = analyst
         self.notifier = notifier
         self.snapshot_fn = snapshot_fn       # () -> dict | None
         self.scratch = scratch
         self.news_fn = news_fn               # () -> dict | None  (BTC news + Fear&Greed)
+        from .convo import Conversation
+        self.convo = Conversation(cfg.convo_path, ttl_s=cfg.convo_ttl_s,
+                                  max_turns=cfg.convo_max_turns)
         self._offset = 0
 
     # ── routing (pure given injected deps) ──
@@ -132,15 +136,24 @@ class TelegramListener:
             return _HELP
         if not snap:
             return "no snapshot yet — monitor is warming up"
-        return self.analyst.answer(text, snap)
+        # natural-language chart request -> send a plot (LLM picks indicators for the ask)
+        if "show me" in low or any(w in low for w in ("chart", "plot", "graph", "draw")):
+            png, cap = self._build_chart(snap, question=text)
+            self.notifier.send_photo(png, cap)
+            return ""
+        # conversational answer, with 24h short-term memory for follow-ups
+        reply = self.analyst.answer(text, snap, history=self.convo.recent())
+        self.convo.add("user", text)
+        self.convo.add("assistant", reply)
+        return reply
 
-    def _build_chart(self, snap):
+    def _build_chart(self, snap, question=None):
         from .plotter import build_btc_chart
         from .signal_tuner import load_tuned
         picks = []
         if snap:
             try:                              # let the LLM choose which indicators to chart
-                picks = self.analyst.pick_indicators(snap)
+                picks = self.analyst.pick_indicators(snap, question=question)
             except Exception:  # noqa: BLE001 - fall back to backtest-leading
                 picks = []
         return build_btc_chart(self.cfg, load_tuned(self.cfg.tuned_signals_path),
@@ -153,8 +166,8 @@ class TelegramListener:
         text = msg.get("text", "")
         if not text:
             return
-        if self.chat_id and chat != self.chat_id:
-            log.info("ignoring message from non-operator chat %s", chat)
+        if self.chat_ids and chat not in self.chat_ids:
+            log.info("ignoring message from non-allowlisted chat %s", chat)
             return
         try:
             reply = self.handle_text(text)
@@ -165,7 +178,7 @@ class TelegramListener:
 
     def poll(self, stop) -> None:
         """Long-poll getUpdates until ``stop`` is set. No-op if no token."""
-        if not (self.token and self.chat_id):
+        if not (self.token and self.chat_ids):
             log.warning("telegram listener disabled (no token/chat id)")
             return
         import requests  # lazy

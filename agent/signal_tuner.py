@@ -333,17 +333,22 @@ def tune_signals(klines: list, *, swing_w: int = 12, tol: int = 6) -> dict:
     }
 
 
+_TF_MIN = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240,
+           "6h": 360, "12h": 720, "1d": 1440}
+
+
 def run_tune(symbol: str, *, timeframes=("5m", "1h", "4h", "1d"), live_tf: str = "1h",
              weeks: float = 8.0, out_path: str = SIGNALS_PATH, stamp: str = "",
-             swing_w: int = 12, tol: int = 6) -> dict:
+             swing_w: int = 12, tol: int = 6, lookback_days: int = 90) -> dict:
     """Backtest the battery across MULTIPLE timeframes (5m/1h/4h/1d), pick per-family
-    and overall winners on each, and persist. The live detector uses the ``live_tf``
-    winners (must match the monitor's trend timeframe). Returns the full result."""
+    and overall winners on each, and persist. NEVER pulls more than ``lookback_days``
+    (~3 months) of candles per timeframe. The live detector uses the ``live_tf`` winners."""
     from .exchange import public_klines
     per_tf = {}
     for tf in timeframes:
         try:
-            kl = public_klines(symbol, tf, 1000)        # Binance max; deepest history per TF
+            bars = min(1000, max(60, lookback_days * 1440 // _TF_MIN.get(tf, 60)))
+            kl = public_klines(symbol, tf, bars)         # capped to <= lookback_days
             per_tf[tf] = tune_signals(kl, swing_w=swing_w, tol=tol)
         except Exception as e:  # noqa: BLE001 - skip a TF that fails, keep the rest
             log.warning("tune %s failed: %s", tf, e)

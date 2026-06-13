@@ -156,6 +156,15 @@ class WatchConfig:
     tuned_signals_path: str = "agent/watch_signals.json"  # best top/bottom oscillators (--tune)
     tune_timeframe: str = "1h"      # candle for --tune backtest
     tune_weeks: float = 8.0         # lookback weeks for --tune
+    tune_lookback_days: int = 90    # HARD cap: never pull more than ~3 months per timeframe
+    # daily digest: send a briefing at this local hour in each of these zones
+    daily_update_hour: int = 9
+    daily_update_tzs: tuple = ("America/New_York", "Asia/Seoul")
+    # short-term conversation memory (24h temp file)
+    convo_path: str = "state/conversation.json"
+    convo_ttl_s: int = 86_400       # remember exchanges this long (24h)
+    convo_max_turns: int = 12       # ...and at most this many recent turns
+    data_retention_days: int = 90   # prune any pulled-data files older than this
 
     @staticmethod
     def from_env() -> "WatchConfig":
@@ -185,6 +194,12 @@ class WatchConfig:
             tuned_signals_path=os.getenv("WATCH_TUNED_PATH", "agent/watch_signals.json"),
             tune_timeframe=os.getenv("WATCH_TUNE_TF", "1h"),
             tune_weeks=_f("WATCH_TUNE_WEEKS", 8.0),
+            tune_lookback_days=_i("WATCH_TUNE_LOOKBACK_DAYS", 90),
+            daily_update_hour=_i("WATCH_DAILY_HOUR", 9),
+            daily_update_tzs=tuple(z.strip() for z in os.getenv(
+                "WATCH_DAILY_TZS", "America/New_York,Asia/Seoul").split(",") if z.strip()),
+            convo_ttl_s=_i("WATCH_CONVO_TTL_S", 86_400),
+            data_retention_days=_i("WATCH_DATA_RETENTION_DAYS", 90),
         )
 
 

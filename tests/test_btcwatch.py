@@ -129,7 +129,8 @@ def test_monitor_run_once_fires_event_and_writes_snapshot(tmp_path):
     cfg = WatchConfig(snapshot_path=str(tmp_path / "snap.json"),
                       state_path=str(tmp_path / "state.json"),
                       tuned_signals_path=str(tmp_path / "none.json"),  # no tuned -> RSI rule
-                      alert_charts=False)                              # hermetic: no chart fetch
+                      alert_charts=False,                              # hermetic: no chart fetch
+                      daily_update_tzs=())                             # no digest in this test
     note = FakeNotifier()
 
     def klines_fn(tf, lim):
@@ -164,6 +165,71 @@ def test_listener_routing():
     for trigger in ("help", "?", "/start"):
         assert "Search by date" in lis.handle_text(trigger)
     assert "Commands" in lis.handle_text("help")
+
+
+# ── sharing / allowlist, memory, daily digest, NL charts ──
+def test_listener_allowlist_multiple_chats():
+    note = FakeNotifier()
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42,99", analyst=MockAnalyst(),
+                           notifier=note, snapshot_fn=lambda: {})
+    lis._process_update({"message": {"chat": {"id": 99}, "text": "/help"}})
+    assert len(note.sent) == 1                     # 99 is on the allowlist
+    lis._process_update({"message": {"chat": {"id": 7}, "text": "hi"}})
+    assert len(note.sent) == 1                     # stranger still ignored
+
+
+def test_notifier_broadcasts_to_each_chat(monkeypatch):
+    from agent.notify import Notifier
+    n = Notifier(token="tok", chat_id="11,22,33")
+    posts = []
+    monkeypatch.setattr("requests.post",
+                        lambda url, **k: posts.append(k.get("json", {}).get("chat_id")))
+    n.send("hi")
+    assert posts == ["11", "22", "33"]             # broadcast to all three
+
+
+def test_conversation_memory_ttl_and_cap(tmp_path):
+    from agent.convo import Conversation
+    t = {"now": 1000.0}
+    c = Conversation(str(tmp_path / "c.json"), ttl_s=100, max_turns=4, clock=lambda: t["now"])
+    c.add("user", "q1")
+    c.add("assistant", "a1")
+    assert [x["text"] for x in c.recent()] == ["q1", "a1"]
+    t["now"] = 1200.0                              # past the 100s TTL
+    assert c.recent() == []
+
+
+def test_natural_language_chart_request(monkeypatch):
+    note = FakeNotifier()
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=note, snapshot_fn=lambda: {"price": 1})
+    monkeypatch.setattr(lis, "_build_chart", lambda snap, question=None: (b"PNG", "cap"))
+    assert lis.handle_text("show me a chart of rsi") == ""     # photo, no text
+    assert note.photos
+
+
+def test_daily_digest_fires_once_per_day(tmp_path):
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        ny = ZoneInfo("America/New_York")
+    except Exception:
+        import pytest
+        pytest.skip("no tzdata")
+    now = datetime.datetime(2026, 6, 15, 9, 30, tzinfo=ny).timestamp()  # 9:30 NY
+    cfg = WatchConfig(state_path=str(tmp_path / "st.json"),
+                      snapshot_path=str(tmp_path / "sn.json"),
+                      daily_update_tzs=("America/New_York",), alert_charts=False)
+    note = FakeNotifier()
+    mon = MarketMonitor(cfg, notifier=note, analyst=MockAnalyst(), price_fn=lambda: 1,
+                        klines_fn=lambda a, b: [], book_fn=lambda: {},
+                        ticker_fn=lambda: None, funding_fn=lambda: None, clock=lambda: now)
+    m = {"price": 1, "technicals": {}, "volume": {}, "order_book": {}, "time": {}}
+    mon._maybe_daily_update(now, m)
+    assert any("Daily BTC briefing" in s for s in note.sent)
+    fired = len(note.sent)
+    mon._maybe_daily_update(now, m)                # same day -> no resend
+    assert len(note.sent) == fired
 
 
 def test_listener_ignores_non_operator_chat():

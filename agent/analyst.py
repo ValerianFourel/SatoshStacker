@@ -143,14 +143,14 @@ class MockAnalyst:
         self.scratch = scratch
         self.last_plot: list = []
 
-    def pick_indicators(self, m: dict) -> list:
+    def pick_indicators(self, m: dict, question: str | None = None) -> list:
         return []
 
     def event_read(self, m: dict, signals) -> str:
         names = ", ".join(getattr(s, "name", str(s)) for s in signals)
         return f"[mock] {names}\n{numeric_summary(m)}"
 
-    def answer(self, question: str, m: dict) -> str:
+    def answer(self, question: str, m: dict, history=None) -> str:
         return f"[mock answer to: {question[:60]}]\n{numeric_summary(m)}"
 
     def search(self, query: str, m: dict, after=None, before=None) -> str:
@@ -263,9 +263,9 @@ class LLMAnalyst:
         payload = {"task": "event_read", "triggers": triggers, "state": _features(m)}
         return self._respond(payload, fallback=numeric_summary(m))
 
-    def answer(self, question: str, m: dict) -> str:
+    def answer(self, question: str, m: dict, history=None) -> str:
         payload = {"task": "answer_question", "question": question[:500],
-                   "state": _features(m)}
+                   "recent_conversation": (history or [])[-8:], "state": _features(m)}
         return self._respond(payload, fallback=numeric_summary(m))
 
     def search(self, query: str, m: dict, after=None, before=None) -> str:
@@ -283,11 +283,13 @@ class LLMAnalyst:
         return self._respond(payload, fallback=format_search(query, results),
                              allow_search=False)  # already searched
 
-    def pick_indicators(self, m: dict) -> list:
-        """Ask the LLM which up-to-3 indicators best illustrate now (for charts)."""
+    def pick_indicators(self, m: dict, question: str | None = None) -> list:
+        """Ask the LLM which up-to-3 indicators to chart (honouring ``question`` if given)."""
         self.last_plot = []
-        self._respond({"task": "pick_chart_indicators", "state": _features(m)},
-                      fallback="", allow_search=False)
+        payload = {"task": "pick_chart_indicators", "state": _features(m)}
+        if question:
+            payload["request"] = question[:300]
+        self._respond(payload, fallback="", allow_search=False)
         return self.last_plot
 
 

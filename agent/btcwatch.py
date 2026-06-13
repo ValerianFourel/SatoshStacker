@@ -29,6 +29,35 @@ def _load_env() -> None:
         pass
 
 
+def _chat_allowlist() -> str:
+    """Comma-joined chat ids allowed to use the bot: operator + WATCH_ALLOWED_CHATS.
+    Alerts broadcast to all of them; only these chats may query."""
+    ids = [os.getenv("TELEGRAM_CHAT_ID", "")] + os.getenv("WATCH_ALLOWED_CHATS", "").split(",")
+    return ",".join(c.strip() for c in ids if c.strip())
+
+
+def _prune_old_data(cfg) -> None:
+    """Erase pulled-data / scratch / state files older than data_retention_days, so the
+    bot never hoards more than ~3 months. Live candles are in-memory; the snapshot/tuned/
+    conversation files are overwritten, so only genuinely stale files get removed."""
+    import time
+    cutoff = time.time() - cfg.data_retention_days * 86_400
+    dirs = {cfg.scratch_dir, os.path.dirname(cfg.snapshot_path) or "."}
+    removed = 0
+    for d in dirs:
+        try:
+            for name in os.listdir(d):
+                p = os.path.join(d, name)
+                if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+                    removed += 1
+        except Exception:  # noqa: BLE001
+            continue
+    if removed:
+        log.info("data retention: pruned %d file(s) older than %dd", removed,
+                 cfg.data_retention_days)
+
+
 def _first_launch_onboarding(notifier, marker_path: str) -> bool:
     """Send the onboarding tip ONCE — the first time the service ever launches. The
     marker file makes it idempotent across restarts. Returns True if it sent."""
@@ -66,7 +95,7 @@ def _build():
                  if cfg.web_search_enabled else None)
     analyst = build_analyst(acfg, api_key, scratch, max_tokens=cfg.analyst_max_tokens,
                             news_fn=news_fn, search_fn=search_fn)
-    notifier = Notifier()
+    notifier = Notifier(chat_id=_chat_allowlist())   # broadcast to operator + shared users
     monitor = MarketMonitor(cfg, notifier=notifier, analyst=analyst)
     return cfg, monitor, analyst, notifier, scratch, news_fn, numeric_summary
 
@@ -105,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         live_tf = args.tf or cfg.trend_tf
         res = run_tune(cfg.symbol, timeframes=tfs, live_tf=live_tf,
                        weeks=args.weeks or cfg.tune_weeks,
+                       lookback_days=cfg.tune_lookback_days,   # <= ~3 months
                        out_path=cfg.tuned_signals_path,
                        stamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
         txt = leaderboard_text(res)
@@ -131,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
 
+    _prune_old_data(cfg)            # data-retention sweep at startup (<= ~3 months)
     mon_thread = threading.Thread(target=monitor.run, args=(stop,), daemon=True)
     mon_thread.start()
 
@@ -141,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.poll_telegram:
         listener = TelegramListener(
             cfg, token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            chat_id=os.getenv("TELEGRAM_CHAT_ID", ""), analyst=analyst,
+            chat_id=_chat_allowlist(), analyst=analyst,
             notifier=notifier, snapshot_fn=monitor.latest_snapshot, scratch=scratch,
             news_fn=news_fn)
         listener.poll(stop)          # blocks in main thread until stop

@@ -18,23 +18,29 @@ class Notifier:
         self.token = clean_secret(token or os.getenv("TELEGRAM_BOT_TOKEN"))
         self.chat_id = clean_secret(chat_id or os.getenv("TELEGRAM_CHAT_ID"))
 
+    def _chat_ids(self) -> list[str]:
+        """One or more chat ids (comma-separated) — broadcast to each."""
+        return [c.strip() for c in (self.chat_id or "").split(",") if c.strip()]
+
     def send(self, text: str) -> None:
         from .secrets import redact
         text = redact(text)  # scrub any credential before it reaches a log/stdout/Telegram
-        if not (self.token and self.chat_id):
+        chats = self._chat_ids()
+        if not (self.token and chats):
             log.info("[notify] %s", text)
             print(f"[notify] {text}")
             return
-        try:
-            import requests
-            requests.post(
-                f"https://api.telegram.org/bot{self.token}/sendMessage",
-                json={"chat_id": self.chat_id, "text": text,
-                      "parse_mode": "Markdown", "disable_web_page_preview": True},
-                timeout=10)
-        except Exception as e:  # noqa: BLE001 - never let notifications break the loop
-            log.warning("telegram send failed: %s", e)
-            print(f"[notify-fallback] {text}")
+        for cid in chats:
+            try:
+                import requests
+                requests.post(
+                    f"https://api.telegram.org/bot{self.token}/sendMessage",
+                    json={"chat_id": cid, "text": text,
+                          "parse_mode": "Markdown", "disable_web_page_preview": True},
+                    timeout=10)
+            except Exception as e:  # noqa: BLE001 - never let notifications break the loop
+                log.warning("telegram send failed: %s", e)
+                print(f"[notify-fallback] {text}")
 
     def send_photo(self, png: bytes | None, caption: str = "") -> None:
         """Send a PNG chart with a caption. Falls back to a text send if no image /
@@ -45,19 +51,20 @@ class Notifier:
                 self.send(caption)
             return
         caption = redact(caption)[:1024]
-        if not (self.token and self.chat_id):
+        chats = self._chat_ids()
+        if not (self.token and chats):
             log.info("[notify-photo] %s", caption)
             print(f"[notify-photo] {caption} (<{len(png)} bytes png>)")
             return
-        try:
-            import requests
-            requests.post(
-                f"https://api.telegram.org/bot{self.token}/sendPhoto",
-                data={"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"},
-                files={"photo": ("chart.png", png, "image/png")}, timeout=20)
-        except Exception as e:  # noqa: BLE001
-            log.warning("telegram sendPhoto failed: %s", e)
-            self.send(caption)
+        for cid in chats:
+            try:
+                import requests
+                requests.post(
+                    f"https://api.telegram.org/bot{self.token}/sendPhoto",
+                    data={"chat_id": cid, "caption": caption, "parse_mode": "Markdown"},
+                    files={"photo": ("chart.png", png, "image/png")}, timeout=20)
+            except Exception as e:  # noqa: BLE001
+                log.warning("telegram sendPhoto failed: %s", e)
 
     def heartbeat(self, mode: str, price: float) -> None:
         self.send(f"💓 SatoshiStacker alive [{mode}] BTC=${price:,.0f}")

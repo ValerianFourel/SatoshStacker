@@ -404,18 +404,59 @@ class MarketMonitor:
         return out
 
     def _load_state(self) -> None:
+        self._sched: dict = {}        # {tz: last-fired YYYY-MM-DD} for the daily digest
         try:
             with open(self.cfg.state_path) as f:
-                self.detector.load_state(json.load(f).get("detector", {}))
+                d = json.load(f)
+            self.detector.load_state(d.get("detector", {}))
+            self._sched = d.get("schedule", {}) or {}
         except Exception:  # noqa: BLE001 - first run / corrupt -> fresh state
             pass
 
     def _save_state(self) -> None:
         try:
             _atomic_write_json(self.cfg.state_path,
-                               {"detector": self.detector.dump_state()})
+                               {"detector": self.detector.dump_state(),
+                                "schedule": getattr(self, "_sched", {})})
         except Exception as e:  # noqa: BLE001
-            log.warning("could not persist detector state: %s", e)
+            log.warning("could not persist state: %s", e)
+
+    def _maybe_daily_update(self, now_ts: float, m: dict) -> None:
+        """Fire a daily briefing at ``daily_update_hour`` local time in each configured
+        zone, once per day per zone (survives restarts via the schedule state)."""
+        import datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except Exception:  # noqa: BLE001 - no zoneinfo -> skip scheduling
+            return
+        for tzname in self.cfg.daily_update_tzs:
+            try:
+                local = datetime.datetime.fromtimestamp(now_ts, ZoneInfo(tzname))
+            except Exception:  # noqa: BLE001 - bad tz / missing tzdata -> skip
+                continue
+            today = local.date().isoformat()
+            if local.hour == self.cfg.daily_update_hour and self._sched.get(tzname) != today:
+                self._sched[tzname] = today
+                self._save_state()
+                self._send_daily_update(m, tzname, local)
+
+    def _send_daily_update(self, m: dict, tzname: str, local) -> None:
+        from .analyst import numeric_summary
+        city = tzname.split("/")[-1].replace("_", " ")
+        head = f"🗓️ *Daily BTC briefing* — 9:00 {city} ({local:%a %d %b})"
+        read = ""
+        if self.cfg.analyst_enabled and self.analyst is not None:
+            try:
+                read = self.analyst.answer(
+                    "Daily BTC briefing: trend & key levels (note timeframes), funding/OI, "
+                    "day/week/month sentiment, and anything notable since yesterday.", m)
+            except Exception as e:  # noqa: BLE001
+                log.warning("daily briefing LLM failed: %s", e)
+        body = f"{head}\n{numeric_summary(m)}"
+        if read:
+            body += f"\n\n🧠 {read}"
+        self.notifier.send(body)
+        self._maybe_chart(m)          # attach a chart (LLM picks set by the answer above)
 
     def latest_snapshot(self) -> dict | None:
         try:
@@ -450,6 +491,7 @@ class MarketMonitor:
         if fired:
             self._handle_events(m, fired)
             self._save_state()
+        self._maybe_daily_update(now, m)
         return m
 
     _ICON = {"peak": "📈", "bottom": "📉", "spike": "⚡", "microstructure": "📖"}
