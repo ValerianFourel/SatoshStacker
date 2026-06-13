@@ -116,22 +116,28 @@ def test_scratch_write_read_and_containment(tmp_path):
 class FakeNotifier:
     def __init__(self):
         self.sent = []
+        self.photos = []
 
     def send(self, text):
         self.sent.append(text)
 
+    def send_photo(self, png, caption=""):
+        self.photos.append((png, caption))
+
 
 def test_monitor_run_once_fires_event_and_writes_snapshot(tmp_path):
     cfg = WatchConfig(snapshot_path=str(tmp_path / "snap.json"),
-                      state_path=str(tmp_path / "state.json"))
+                      state_path=str(tmp_path / "state.json"),
+                      tuned_signals_path=str(tmp_path / "none.json"),  # no tuned -> RSI rule
+                      alert_charts=False)                              # hermetic: no chart fetch
     note = FakeNotifier()
 
     def klines_fn(tf, lim):
         return flat_fast() if tf == cfg.kline_tf else trend_klines()
 
     mon = MarketMonitor(cfg, notifier=note, analyst=MockAnalyst(),
-                        price_fn=lambda: 110_000.0, klines_fn=klines_fn,
-                        book_fn=book, clock=lambda: 100.0)
+                        price_fn=lambda: 110_000.0, klines_fn=klines_fn, book_fn=book,
+                        ticker_fn=lambda: None, funding_fn=lambda: None, clock=lambda: 100.0)
     m = mon.run_once()
     assert "peak" in m["events"]                         # rising-to-high + RSI 100
     assert len(note.sent) == 1 and "peak" in note.sent[0]
@@ -395,6 +401,27 @@ def test_detector_funding_and_oi_flags():
     m2 = make_metrics()
     m2["futures"] = {"oi_change_24h_pct": 12.0}
     assert "oi_spike" in [s.name for s in det2.evaluate(m2, now_ts=0.0)]
+
+
+# ── plotting ──
+def test_chart_renders_png_with_leading_indicators():
+    from agent.plotter import build_btc_chart
+    kl = [[float(i * 3_600_000), 100 + i, 101 + i, 99 + i, 100 + i, 10.0] for i in range(60)]
+    tuned = {"best_top": {"name": "rsi_14", "threshold": 70, "auc": 0.7},
+             "best_bottom": {"name": "mfi_14", "threshold": 30, "auc": 0.6}}
+    png, cap = build_btc_chart(WatchConfig(), tuned, klines_fn=lambda tf, lim: kl)
+    # PNG bytes if matplotlib is installed; None (fail-safe) if not — both acceptable
+    assert png is None or (isinstance(png, bytes) and png[:4] == b"\x89PNG")
+    assert "RSI(14)" in cap and "MFI(14)" in cap
+
+
+def test_listener_chart_command_sends_photo(monkeypatch):
+    note = FakeNotifier()
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=note, snapshot_fn=lambda: {"price": 1})
+    monkeypatch.setattr(lis, "_build_chart", lambda snap: (b"\x89PNG-data", "📈 chart"))
+    assert lis.handle_text("/chart") == ""        # photo sent, no text reply
+    assert note.photos and note.photos[0][0] == b"\x89PNG-data"
 
 
 def test_first_launch_onboarding_sends_once(tmp_path):

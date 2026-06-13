@@ -142,6 +142,7 @@ class WatchConfig:
     analyst_enabled: bool = True          # call the LLM on events (else numeric-only alert)
     analyst_max_tokens: int = 450
     poll_telegram: bool = True            # run the inbound Q&A listener
+    alert_charts: bool = True             # attach a price+leading-indicator chart to alerts
     news_enabled: bool = True             # attach BTC headlines + Fear&Greed (keyless)
     news_ttl_s: int = 600                 # cache news this long (don't refetch every scan)
     web_search_enabled: bool = True       # let the analyst look things up online
@@ -174,6 +175,7 @@ class WatchConfig:
             alert_cooldown_s=_i("WATCH_ALERT_COOLDOWN_S", 1800),
             analyst_enabled=_b("WATCH_ANALYST_ENABLED", True),
             poll_telegram=_b("WATCH_POLL_TELEGRAM", True),
+            alert_charts=_b("WATCH_ALERT_CHARTS", True),
             scratch_dir=os.getenv("WATCH_SCRATCH_DIR", "scratch"),
             news_enabled=_b("WATCH_NEWS_ENABLED", True),
             news_ttl_s=_i("WATCH_NEWS_TTL_S", 600),

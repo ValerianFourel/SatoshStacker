@@ -446,10 +446,26 @@ class MarketMonitor:
             try:
                 read = self.analyst.event_read(m, fired)
                 self.notifier.send(f"{body}\n\n🧠 {read}")
+                self._maybe_chart(m)
                 return
             except Exception as e:  # noqa: BLE001 - never let analysis break the loop
                 log.warning("analyst event_read failed: %s", e)
         self.notifier.send(body)  # numeric-only fallback
+        self._maybe_chart(m)
+
+    def _maybe_chart(self, m: dict) -> None:
+        """Attach a price + leading-indicator chart to the alert (if enabled)."""
+        if not getattr(self.cfg, "alert_charts", False):
+            return
+        try:
+            from .plotter import build_btc_chart
+            from .signal_tuner import load_tuned
+            png, cap = build_btc_chart(self.cfg, load_tuned(self.cfg.tuned_signals_path),
+                                       snapshot=m)
+            if png:
+                self.notifier.send_photo(png, cap)
+        except Exception as e:  # noqa: BLE001 - a chart must never break the alert
+            log.warning("alert chart failed: %s", e)
 
     def run(self, stop) -> None:
         """Loop until ``stop`` (a threading.Event-like with .is_set/.wait) is set."""

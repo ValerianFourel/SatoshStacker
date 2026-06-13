@@ -25,7 +25,8 @@ _HELP = (
     "*Commands*\n"
     "`/btc` or `/status` — my read of BTC right now\n"
     "`/raw` — just the numbers, no LLM\n"
-    "`/news` — BTC headlines + Fear&Greed\n"
+    "`/chart` — price + the leading indicators, plotted\n"
+    "`/news` — BTC headlines + Fear&Greed (day/week/month)\n"
     "`/search <query>` — search the web, read the top articles, summarize\n"
     "`/notes` — list scratch files · `/get <file>` — read one\n"
     "`/help` — this message\n"
@@ -107,6 +108,10 @@ class TelegramListener:
             if not snap:
                 return "no snapshot yet — monitor is warming up"
             return self.analyst.answer("Give a concise read of BTC right now.", snap)
+        if low in ("/chart", "/plot"):
+            png, cap = self._build_chart(snap)
+            self.notifier.send_photo(png, cap)
+            return ""        # photo already sent; no extra text
         if low == "/news":
             from .websearch import news_line
             return news_line(self.news_fn()) if self.news_fn else "news disabled"
@@ -129,6 +134,12 @@ class TelegramListener:
             return "no snapshot yet — monitor is warming up"
         return self.analyst.answer(text, snap)
 
+    def _build_chart(self, snap):
+        from .plotter import build_btc_chart
+        from .signal_tuner import load_tuned
+        return build_btc_chart(self.cfg, load_tuned(self.cfg.tuned_signals_path),
+                               snapshot=snap or None)
+
     # ── network ──
     def _process_update(self, update: dict) -> None:
         msg = update.get("message") or update.get("channel_post") or {}
@@ -140,7 +151,9 @@ class TelegramListener:
             log.info("ignoring message from non-operator chat %s", chat)
             return
         try:
-            self.notifier.send(self.handle_text(text))
+            reply = self.handle_text(text)
+            if reply:                       # /chart sends a photo itself and returns ""
+                self.notifier.send(reply)
         except Exception as e:  # noqa: BLE001 - a bad question must not kill the loop
             log.warning("handler error: %s", e)
 

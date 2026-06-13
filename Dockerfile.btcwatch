@@ -9,9 +9,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# runtime deps + trafilatura (clean article extraction for the analyst's web reads)
+# runtime deps + trafilatura (article extraction) + matplotlib (chart plots)
 COPY requirements-runtime.txt .
-RUN pip install --no-cache-dir -r requirements-runtime.txt trafilatura
+RUN pip install --no-cache-dir -r requirements-runtime.txt trafilatura matplotlib
 
 # only the agent package is needed (btcwatch imports nothing from backtest/tests)
 COPY agent/ ./agent/

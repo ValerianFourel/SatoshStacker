@@ -36,6 +36,29 @@ class Notifier:
             log.warning("telegram send failed: %s", e)
             print(f"[notify-fallback] {text}")
 
+    def send_photo(self, png: bytes | None, caption: str = "") -> None:
+        """Send a PNG chart with a caption. Falls back to a text send if no image /
+        no Telegram. Never raises."""
+        from .secrets import redact
+        if not png:
+            if caption:
+                self.send(caption)
+            return
+        caption = redact(caption)[:1024]
+        if not (self.token and self.chat_id):
+            log.info("[notify-photo] %s", caption)
+            print(f"[notify-photo] {caption} (<{len(png)} bytes png>)")
+            return
+        try:
+            import requests
+            requests.post(
+                f"https://api.telegram.org/bot{self.token}/sendPhoto",
+                data={"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"},
+                files={"photo": ("chart.png", png, "image/png")}, timeout=20)
+        except Exception as e:  # noqa: BLE001
+            log.warning("telegram sendPhoto failed: %s", e)
+            self.send(caption)
+
     def heartbeat(self, mode: str, price: float) -> None:
         self.send(f"💓 SatoshiStacker alive [{mode}] BTC=${price:,.0f}")
 
