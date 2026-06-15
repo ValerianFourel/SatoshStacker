@@ -1370,3 +1370,63 @@ def test_origins_alarm_cooldown_control():
     assert "og:a:+" in flat and "og:a:-" in flat
     assert apply_callback("og:a:+", prefs)[0]["alarm_cooldown"] == 1200    # +5 min
     assert apply_callback("og:a:-", prefs)[0]["alarm_cooldown"] == 600     # -5 min
+
+
+# ── parameter-sweep retune (rsi(14) -> rsi(15) etc.) + /retune command ──
+def test_tuner_sweeps_indicator_periods():
+    from agent.signal_tuner import tune_signals, compute_one, _pretty
+    n, period = 400, 44
+    kl = [[float(i), 100 + 10 * np.sin(i * 2 * np.pi / period),
+           100 + 10 * np.sin(i * 2 * np.pi / period) + 0.6,
+           100 + 10 * np.sin(i * 2 * np.pi / period) - 0.6,
+           100 + 10 * np.sin(i * 2 * np.pi / period), 1000.0] for i in range(n)]
+    res = tune_signals(kl, swing_w=8, tol=4)
+    names = {d["name"] for d in res["top_leaderboard"]}
+    assert {"rsi_7", "rsi_15", "rsi_28"} <= names          # period variants are in the sweep
+    assert len(res["top_leaderboard"]) > 25                # sweep is bigger than the fixed battery
+    a = np.array(kl, dtype=float)
+    s15 = compute_one("rsi_15", a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5])
+    assert np.isfinite(s15[-1])                            # a swept winner computes live
+    assert _pretty("rsi_15") == "RSI(15)" and _pretty("stoch_rsi_21") == "StochRSI(21)"
+
+
+def test_retune_runs_and_reports(monkeypatch):
+    import agent.signal_tuner as st
+    monkeypatch.setattr(st, "run_tune", lambda *a, **k: {
+        "live_tf": "1h", "best_top": {"name": "rsi_15", "auc": 0.8},
+        "best_bottom": None, "per_timeframe": {}})
+    monkeypatch.setattr(st, "leaderboard_text", lambda res: "LEADERBOARD")
+    note = FakeNotifier()
+    lis = TelegramListener(WatchConfig(tuned_signals_path="x.json"), token="t", chat_id="42",
+                           analyst=MockAnalyst(), notifier=note, snapshot_fn=lambda: {})
+    lis._tuning = True                                     # set by _start_retune in prod
+    lis._do_retune(8.0)                                    # run synchronously (no thread race)
+    assert any("Retune complete" in s and "LEADERBOARD" in s for s in note.sent)
+    assert lis._tuning is False
+
+
+def test_retune_command_dedup():
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: {})
+    lis._tuning = True                                     # a retune already running
+    assert "already running" in lis.handle_text("/retune")   # deterministic: no thread spawned
+
+
+def test_retune_weeks_controls_window(monkeypatch, tmp_path):
+    import agent.exchange as ex
+    import agent.signal_tuner as st
+    seen = {}
+
+    def fake_klines(symbol, tf, bars):
+        seen[tf] = bars
+        return [[float(i), 100 + (i % 7), 101 + (i % 7), 99 + (i % 7), 100 + (i % 7), 1000.0]
+                for i in range(bars)]
+    monkeypatch.setattr(ex, "public_klines", fake_klines)
+    st.run_tune("BTC/USDT", timeframes=("1h",), live_tf="1h", weeks=4, lookback_days=90,
+                out_path=str(tmp_path / "w.json"), stamp="x")
+    bars_4w = seen["1h"]
+    st.run_tune("BTC/USDT", timeframes=("1h",), live_tf="1h", weeks=8, lookback_days=90,
+                out_path=str(tmp_path / "w.json"), stamp="x")
+    bars_8w = seen["1h"]
+    assert bars_8w > bars_4w        # more weeks -> a genuinely larger backtest window (was ignored before)
+    assert json.load(open(tmp_path / "w.json"))["weeks"] == 8     # atomic write produced valid json

@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import tempfile
 
 import numpy as np
 
@@ -234,9 +237,56 @@ PERIODS = {"rsi_14": 14, "rsi_21": 21, "stoch_rsi_14": 14, "stoch_14": 14,
            "cvd_slope_14": 14}
 
 
+# ── parameter SWEEP: try several periods per family so tuning can pick e.g. RSI(15) > RSI(14) ──
+# {family: (periods, fn(o,h,l,c,v,n) -> series, family_group)}. Each default period is included
+# so a retune never regresses below the current live signal.
+TUNE_GRID = {
+    # momentum oscillators
+    "rsi":        ([7, 9, 11, 14, 15, 21, 28], lambda o, h, l, c, v, n: _rsi(c, n), "momentum"),
+    "stoch_rsi":  ([14, 21],                    lambda o, h, l, c, v, n: _stoch_rsi(c, n), "momentum"),
+    "stoch":      ([9, 14, 21],                 lambda o, h, l, c, v, n: _stoch_k(c, h, l, n), "momentum"),
+    "williams":   ([9, 14, 21],                 lambda o, h, l, c, v, n: _williams(c, h, l, n), "momentum"),
+    "cci":        ([14, 20, 30],                lambda o, h, l, c, v, n: _cci(c, h, l, n), "momentum"),
+    "roc":        ([10, 14, 20],                lambda o, h, l, c, v, n: _roc(c, n), "momentum"),
+    # volatility
+    "bb_pctb":    ([14, 20, 26],                lambda o, h, l, c, v, n: _bb_pctb(c, n), "volatility"),
+    "keltner_pos": ([14, 20],                   lambda o, h, l, c, v, n: _keltner_pos(h, l, c, n), "volatility"),
+    "atr_pct":    ([14, 20],                     lambda o, h, l, c, v, n: _atr_pct(h, l, c, n), "volatility"),
+    # trend
+    "sma_dist":   ([100, 200],                  lambda o, h, l, c, v, n: _sma_dist(c, n), "trend"),
+    "supertrend": ([10, 14],                    lambda o, h, l, c, v, n: _supertrend_pos(h, l, c, n), "trend"),
+    # volume
+    "mfi":        ([9, 14, 21],                 lambda o, h, l, c, v, n: _mfi(c, h, l, v, n), "volume"),
+    "obv_slope":  ([14, 21],                    lambda o, h, l, c, v, n: _obv_slope(c, v, n), "volume"),
+    "vwap_dist":  ([14, 20],                    lambda o, h, l, c, v, n: _vwap_dist(h, l, c, v, n), "volume"),
+    "cvd_slope":  ([14, 21],                    lambda o, h, l, c, v, n: _cvd_slope(o, c, v, n), "volume"),
+}
+_GRID_FAMS = sorted(TUNE_GRID, key=len, reverse=True)   # longest first: "stoch_rsi" before "stoch"
+
+
+def _sweep(o, h, l, c, v) -> dict:
+    """{name: (series, family_group, period)} — the battery WITH period variants, for tuning."""
+    out = {}
+    for fam, (periods, fn, grp) in TUNE_GRID.items():
+        for n in periods:
+            out[f"{fam}_{n}"] = (fn(o, h, l, c, v, n), grp, n)
+    out["macd_hist"] = (_macd_hist(c), "momentum", 26)            # fixed-param extras
+    out["ema_cross_21_50"] = (_ema_cross(c, 21, 50), "trend", 50)
+    out["ema_cross_50_200"] = (_ema_cross(c, 50, 200), "trend", 200)
+    return out
+
+
 def compute_one(name: str, o, h, l, c, v) -> np.ndarray:
-    """Compute a single named indicator (used live to evaluate the tuned winners)."""
-    return battery(o, h, l, c, v).get(name, np.full(len(c), np.nan))
+    """Compute a single named indicator (used live to evaluate the tuned winners). Handles both
+    the fixed battery names AND swept names like 'rsi_15' (family_period)."""
+    bat = battery(o, h, l, c, v)
+    if name in bat:
+        return bat[name]
+    for fam in _GRID_FAMS:
+        m = re.fullmatch(re.escape(fam) + r"_(\d+)", name)
+        if m:
+            return TUNE_GRID[fam][1](o, h, l, c, v, int(m.group(1)))
+    return np.full(len(c), np.nan)
 
 
 def latest_values(klines: list) -> dict:
@@ -324,13 +374,13 @@ def tune_signals(klines: list, *, swing_w: int = 12, tol: int = 6) -> dict:
     a = np.asarray(klines, dtype=float)
     o, h, l, c, v = a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5]
     tops, bottoms = label_extrema(h, l, swing_w)
-    bat = battery(o, h, l, c, v)
+    sweep = _sweep(o, h, l, c, v)            # battery WITH period variants (rsi_7..rsi_28, etc.)
     top_rank, bot_rank = [], []
-    for name, series in bat.items():
+    for name, (series, grp, period) in sweep.items():
         st = score_signal(series, tops, tol, side="top")
         sb = score_signal(series, bottoms, tol, side="bottom")
-        top_rank.append({"name": name, "family": FAMILY[name], "period": PERIODS[name], **st})
-        bot_rank.append({"name": name, "family": FAMILY[name], "period": PERIODS[name], **sb})
+        top_rank.append({"name": name, "family": grp, "period": period, **st})
+        bot_rank.append({"name": name, "family": grp, "period": period, **sb})
     top_rank.sort(key=lambda d: d["auc"], reverse=True)
     bot_rank.sort(key=lambda d: d["auc"], reverse=True)
 
@@ -363,11 +413,12 @@ def run_tune(symbol: str, *, timeframes=("5m", "1h", "4h", "1d"), live_tf: str =
     and overall winners on each, and persist. NEVER pulls more than ``lookback_days``
     (~3 months) of candles per timeframe. The live detector uses the ``live_tf`` winners."""
     from .exchange import public_klines
+    days = min(lookback_days, max(1, int(round(weeks * 7))))   # `weeks` actually sizes the window now
     per_tf = {}
     for tf in timeframes:
         try:
-            bars = min(1000, max(60, lookback_days * 1440 // _TF_MIN.get(tf, 60)))
-            kl = public_klines(symbol, tf, bars)         # capped to <= lookback_days
+            bars = min(1000, max(60, days * 1440 // _TF_MIN.get(tf, 60)))   # still <= lookback_days
+            kl = public_klines(symbol, tf, bars)
             per_tf[tf] = tune_signals(kl, swing_w=swing_w, tol=tol)
         except Exception as e:  # noqa: BLE001 - skip a TF that fails, keep the rest
             log.warning("tune %s failed: %s", tf, e)
@@ -381,9 +432,13 @@ def run_tune(symbol: str, *, timeframes=("5m", "1h", "4h", "1d"), live_tf: str =
         "best_bottom": live["best_bottom"] if live else None,
         "per_timeframe": {tf: {k: r[k] for k in keep} for tf, r in per_tf.items()},
     }
-    try:
-        with open(out_path, "w") as f:
+    try:                                          # atomic write so the monitor never reads a half file
+        d = os.path.dirname(out_path) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
             json.dump(res, f, indent=2)
+        os.replace(tmp, out_path)
     except Exception as e:  # noqa: BLE001
         log.warning("could not write %s: %s", out_path, e)
     return res
@@ -408,8 +463,19 @@ _PRETTY = {
 }
 
 
+_PRETTY_BASE = {"rsi": "RSI", "stoch_rsi": "StochRSI", "stoch": "Stoch", "williams": "Williams%R",
+                "cci": "CCI", "roc": "ROC", "bb_pctb": "Boll %B", "keltner_pos": "Keltner",
+                "atr_pct": "ATR%", "sma_dist": "SMA", "supertrend": "Supertrend", "mfi": "MFI",
+                "obv_slope": "OBV", "vwap_dist": "VWAP", "cvd_slope": "CVD"}
+
+
 def _pretty(name):
-    return _PRETTY.get(name, name)
+    if name in _PRETTY:
+        return _PRETTY[name]
+    m = re.fullmatch(r"([a-z_]+?)_(\d+)", name or "")   # swept name -> e.g. RSI(15)
+    if m and m.group(1) in _PRETTY_BASE:
+        return f"{_PRETTY_BASE[m.group(1)]}({m.group(2)})"
+    return name
 
 
 def _score(auc):

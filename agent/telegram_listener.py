@@ -31,6 +31,8 @@ _HELP = (
     "`/origins` — 🛰️ control panel: tap which signals may ping, how many must agree, the "
     "cadence, the preset, mute — all live\n"
     "`/digest` — my latest autonomous news read (kept copy)\n"
+    "`/retune [weeks]` — recompute the best top/bottom callers on fresh data, *sweeping periods* "
+    "(e.g. RSI 7–28) to pick the strongest parameterization (e.g. RSI(15) over RSI(14))\n"
     "`/btc` or `/status` — my read of BTC right now\n"
     "`/raw` — just the numbers, no LLM\n"
     "`/chart` — price + the leading indicators, plotted\n"
@@ -188,6 +190,7 @@ class TelegramListener:
                              max_chat_turns=cfg.memory_max_turns)
         self.alerts = AlertStore(cfg.user_alerts_path)
         self._offset = 0
+        self._tuning = False        # guard: one retune at a time
 
     # ── routing (pure given injected deps) ──
     def handle_text(self, text: str) -> str:
@@ -227,6 +230,8 @@ class TelegramListener:
             return widget_text(self._prefs_full())   # text view; _process_update sends buttons
         if low in ("/digest", "/newsdigest"):
             return self._digest_text()
+        if low.split(" ", 1)[0] in ("/retune", "/tune", "/recompute"):
+            return self._start_retune(text)
         if low.split(" ", 1)[0] in ("/sensitivity", "/sens"):
             return self._sensitivity_cmd(text)
         if low in ("/mute", "/silence"):
@@ -361,6 +366,39 @@ class TelegramListener:
                            overrides=cur["overrides"], disabled=cur["disabled"],
                            confluence=cur["confluence"], cadence=cur["cadence"],
                            alarm_cooldown=cur["alarm_cooldown"])
+
+    def _start_retune(self, text: str) -> str:
+        """Recompute the top/bottom callers on the server CPU from fresh BTC data, SWEEPING the
+        indicator periods (e.g. RSI 7..28) to find the best parameterization. Runs in a daemon
+        thread so it never blocks the chat; posts the winners when done. Optional weeks: `/retune 12`."""
+        import threading
+        if self._tuning:
+            return "🔬 a retune is already running — I'll post the winners when it's done."
+        m = re.search(r"\b(\d+(?:\.\d+)?)\b", text)
+        weeks = float(m.group(1)) if m else self.cfg.tune_weeks
+        weeks = max(2.0, min(weeks, self.cfg.tune_lookback_days / 7.0))   # bound to <= ~3 months
+        self._tuning = True
+        threading.Thread(target=self._do_retune, args=(weeks,), daemon=True).start()
+        return (f"🔬 *Retuning on the server* — backtesting the indicator battery and *sweeping "
+                f"periods* (e.g. RSI 7–28, Stoch/MFI/Boll/CCI…) over ~{weeks:g} weeks of fresh "
+                f"BTC data across 5m/1h/4h/1d. I'll post the best top/bottom callers in ~½–1 min.")
+
+    def _do_retune(self, weeks: float) -> None:
+        import datetime
+        from .signal_tuner import leaderboard_text, run_tune
+        try:
+            res = run_tune(self.cfg.symbol, timeframes=("5m", "1h", "4h", "1d"),
+                           live_tf=self.cfg.trend_tf, weeks=weeks,
+                           lookback_days=self.cfg.tune_lookback_days,
+                           out_path=self.cfg.tuned_signals_path,
+                           stamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
+            self.notifier.send("✅ *Retune complete* — live detector now uses these (best period "
+                               "per family, swept on fresh data).\n" + leaderboard_text(res)[:3500])
+        except Exception as e:  # noqa: BLE001 - a retune must never crash the bot
+            log.warning("retune failed: %s", e)
+            self.notifier.send(f"⚠️ retune failed: {e}")
+        finally:
+            self._tuning = False
 
     def _digest_text(self) -> str:
         """Show the latest autonomous news digest (the cached copy the monitor keeps)."""
