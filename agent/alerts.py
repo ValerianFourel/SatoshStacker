@@ -73,6 +73,12 @@ _METRIC_PHRASES = (
     ("macd hist", "macd_hist"), ("macd", "macd_hist"), ("vwap", "vwap_dist_20"),
     ("obv", "obv_slope_14"), ("keltner", "keltner_pos_20"), ("supertrend", "supertrend_10"),
     ("roc", "roc_10"), ("atr", "atr"),
+    # moving averages (recognized so 'ema in sell mode' -> None/LLM, not a silent default trio;
+    # they have no overbought/oversold 'mode' — alarm them with explicit numbers or via the tuner)
+    ("moving average", "ema_dist_50"), ("ema cross", "ema_cross_7_25"),
+    ("ema slope", "ema_slope_50"), ("ema50", "ema_dist_50"), ("ema200", "ema_dist_200"),
+    ("ma50", "ema_dist_50"), ("ma200", "ema_dist_200"), ("sma50", "sma_dist_50"),
+    ("sma200", "sma_dist_200"), ("ema", "ema_dist_50"), ("sma", "sma_dist_200"),
     ("long/short", "ls"), ("long short", "ls"), ("longshort", "ls"),
     ("open interest", "oi_change"), ("range position", "range_pos"), ("range pos", "range_pos"),
     ("funding", "funding"), ("rsi", "rsi"), ("trend", "trend"), ("volume", "vol_z"),
@@ -101,6 +107,13 @@ _METRIC_ALIASES = {
     "supertrend": "supertrend_10", "supertrend_10": "supertrend_10",
     "sma_dist_200": "sma_dist_200", "atr_pct_14": "atr_pct_14", "bb_width_20": "bb_width_20",
     "rsi_21": "rsi_21",
+    # moving averages: price-vs-MA distance (%), MA velocity (%), MA crosses
+    "ema_dist_50": "ema_dist_50", "ema_dist_200": "ema_dist_200", "ema50": "ema_dist_50",
+    "ema200": "ema_dist_200", "ma50": "ema_dist_50", "ma200": "ema_dist_200",
+    "sma_dist_50": "sma_dist_50", "sma50": "sma_dist_50", "sma200": "sma_dist_200",
+    "ema_slope_50": "ema_slope_50", "ema_slope_200": "ema_slope_200",
+    "ema_cross_7_25": "ema_cross_7_25", "ema_cross_21_50": "ema_cross_21_50",
+    "ema_cross_50_200": "ema_cross_50_200",
 }
 
 
@@ -117,7 +130,9 @@ def metrics_help() -> str:
     osc = ", ".join(f"{k} (overbought≥{ob:g}/oversold≤{os_:g})" for k, (ob, os_) in _OSC.items())
     other = "funding, ls (long/short), oi_change, change_24h, trend, vol_z, price, atr, " \
             "macd_hist, roc_10, vwap_dist_20, obv_slope_14, keltner_pos_20, supertrend_10, " \
-            "rsi_5m/rsi_1h/rsi_4h/rsi_1d"
+            "ema_dist_50, ema_dist_200, sma_dist_50, sma_dist_200 (price % vs MA), " \
+            "ema_slope_50, ema_slope_200 (MA velocity %), ema_cross_7_25, ema_cross_21_50, " \
+            "ema_cross_50_200, rsi_5m/rsi_1h/rsi_4h/rsi_1d"
     return f"bounded oscillators: {osc}. other metrics (use explicit numbers): {other}"
 
 

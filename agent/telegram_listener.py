@@ -387,7 +387,7 @@ class TelegramListener:
         import datetime
         from .signal_tuner import leaderboard_text, run_tune
         try:
-            res = run_tune(self.cfg.symbol, timeframes=("5m", "1h", "4h", "1d"),
+            res = run_tune(self.cfg.symbol, timeframes=("5m", "15m", "1h", "4h", "1d"),
                            live_tf=self.cfg.trend_tf, weeks=weeks,
                            lookback_days=self.cfg.tune_lookback_days,
                            out_path=self.cfg.tuned_signals_path,

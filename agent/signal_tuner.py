@@ -165,6 +165,20 @@ def _sma_dist(c, n):                  # % distance above/below the SMA (e.g. 200
     return np.where(s == 0, np.nan, (c - s) / s * 100)
 
 
+def _ema_dist(c, n):                  # % distance of price above/below EMA(n) — stretched up = topside
+    e = _ema(c, n)
+    return np.where(e == 0, np.nan, (c - e) / e * 100)
+
+
+def _ema_slope(c, n, k=3):           # VELOCITY of the MA: % change of EMA(n) over k bars (rising = +)
+    e = _ema(c, n)
+    out = np.full(len(c), np.nan)
+    if len(c) > k:
+        prev = e[:-k]
+        out[k:] = np.where(prev == 0, np.nan, (e[k:] - prev) / np.abs(prev) * 100)
+    return out
+
+
 def _supertrend_pos(h, l, c, n=10, mult=3.0):
     a = _atr(h, l, c, n)
     return np.where(a == 0, 0.0, (c - _sma(c, n)) / a)   # ATR-normalized trend position
@@ -209,9 +223,13 @@ def battery(o, h, l, c, v) -> dict:
         # volatility
         "bb_pctb_20": _bb_pctb(c, 20), "bb_width_20": _bb_width(c, 20),
         "keltner_pos_20": _keltner_pos(h, l, c, 20), "atr_pct_14": _atr_pct(h, l, c, 14),
-        # trend
+        # trend (incl. moving-average distance + velocity, Binance-style MAs)
         "ema_cross_21_50": _ema_cross(c, 21, 50), "ema_cross_50_200": _ema_cross(c, 50, 200),
-        "sma_dist_200": _sma_dist(c, 200), "supertrend_10": _supertrend_pos(h, l, c, 10),
+        "ema_cross_7_25": _ema_cross(c, 7, 25),
+        "sma_dist_200": _sma_dist(c, 200), "sma_dist_50": _sma_dist(c, 50),
+        "ema_dist_50": _ema_dist(c, 50), "ema_dist_200": _ema_dist(c, 200),
+        "ema_slope_50": _ema_slope(c, 50), "ema_slope_200": _ema_slope(c, 200),
+        "supertrend_10": _supertrend_pos(h, l, c, 10),
         # volume
         "mfi_14": _mfi(c, h, l, v, 14), "obv_slope_14": _obv_slope(c, v, 14),
         "vwap_dist_20": _vwap_dist(h, l, c, v, 20), "cvd_slope_14": _cvd_slope(o, c, v, 14),
@@ -224,15 +242,19 @@ FAMILY = {
     "williams_14": "momentum", "roc_10": "momentum", "roc_20": "momentum",
     "bb_pctb_20": "volatility", "bb_width_20": "volatility",
     "keltner_pos_20": "volatility", "atr_pct_14": "volatility",
-    "ema_cross_21_50": "trend", "ema_cross_50_200": "trend",
-    "sma_dist_200": "trend", "supertrend_10": "trend",
+    "ema_cross_21_50": "trend", "ema_cross_50_200": "trend", "ema_cross_7_25": "trend",
+    "sma_dist_200": "trend", "sma_dist_50": "trend", "ema_dist_50": "trend",
+    "ema_dist_200": "trend", "ema_slope_50": "trend", "ema_slope_200": "trend",
+    "supertrend_10": "trend",
     "mfi_14": "volume", "obv_slope_14": "volume", "vwap_dist_20": "volume",
     "cvd_slope_14": "volume",
 }
 PERIODS = {"rsi_14": 14, "rsi_21": 21, "stoch_rsi_14": 14, "stoch_14": 14,
            "macd_hist": 26, "cci_20": 20, "williams_14": 14, "roc_10": 10, "roc_20": 20,
            "bb_pctb_20": 20, "bb_width_20": 20, "keltner_pos_20": 20, "atr_pct_14": 14,
-           "ema_cross_21_50": 50, "ema_cross_50_200": 200, "sma_dist_200": 200,
+           "ema_cross_21_50": 50, "ema_cross_50_200": 200, "ema_cross_7_25": 25,
+           "sma_dist_200": 200, "sma_dist_50": 50, "ema_dist_50": 50, "ema_dist_200": 200,
+           "ema_slope_50": 50, "ema_slope_200": 200,
            "supertrend_10": 10, "mfi_14": 14, "obv_slope_14": 14, "vwap_dist_20": 20,
            "cvd_slope_14": 14}
 
@@ -252,8 +274,10 @@ TUNE_GRID = {
     "bb_pctb":    ([14, 20, 26],                lambda o, h, l, c, v, n: _bb_pctb(c, n), "volatility"),
     "keltner_pos": ([14, 20],                   lambda o, h, l, c, v, n: _keltner_pos(h, l, c, n), "volatility"),
     "atr_pct":    ([14, 20],                     lambda o, h, l, c, v, n: _atr_pct(h, l, c, n), "volatility"),
-    # trend
-    "sma_dist":   ([100, 200],                  lambda o, h, l, c, v, n: _sma_dist(c, n), "trend"),
+    # trend (moving averages — distance + velocity, swept over Binance-style lengths)
+    "sma_dist":   ([20, 50, 100, 200],          lambda o, h, l, c, v, n: _sma_dist(c, n), "trend"),
+    "ema_dist":   ([7, 25, 50, 99, 200],        lambda o, h, l, c, v, n: _ema_dist(c, n), "trend"),
+    "ema_slope":  ([25, 50, 99, 200],           lambda o, h, l, c, v, n: _ema_slope(c, n), "trend"),
     "supertrend": ([10, 14],                    lambda o, h, l, c, v, n: _supertrend_pos(h, l, c, n), "trend"),
     # volume
     "mfi":        ([9, 14, 21],                 lambda o, h, l, c, v, n: _mfi(c, h, l, v, n), "volume"),
@@ -273,6 +297,7 @@ def _sweep(o, h, l, c, v) -> dict:
     out["macd_hist"] = (_macd_hist(c), "momentum", 26)            # fixed-param extras
     out["ema_cross_21_50"] = (_ema_cross(c, 21, 50), "trend", 50)
     out["ema_cross_50_200"] = (_ema_cross(c, 50, 200), "trend", 200)
+    out["ema_cross_7_25"] = (_ema_cross(c, 7, 25), "trend", 25)   # Binance-style fast/slow MA cross
     return out
 
 
@@ -458,7 +483,10 @@ _PRETTY = {
     "williams_14": "Williams%R", "roc_10": "ROC(10)", "roc_20": "ROC(20)",
     "bb_pctb_20": "Boll %B", "bb_width_20": "Boll width", "keltner_pos_20": "Keltner",
     "atr_pct_14": "ATR%", "ema_cross_21_50": "EMA 21/50", "ema_cross_50_200": "EMA 50/200",
-    "sma_dist_200": "SMA-200", "supertrend_10": "Supertrend", "mfi_14": "MFI(14)",
+    "ema_cross_7_25": "EMA 7/25", "sma_dist_200": "SMA-200", "sma_dist_50": "SMA-50",
+    "ema_dist_50": "EMA50 dist", "ema_dist_200": "EMA200 dist",
+    "ema_slope_50": "EMA50 vel", "ema_slope_200": "EMA200 vel",
+    "supertrend_10": "Supertrend", "mfi_14": "MFI(14)",
     "obv_slope_14": "OBV", "vwap_dist_20": "VWAP(20)", "cvd_slope_14": "CVD",
 }
 
@@ -466,16 +494,22 @@ _PRETTY = {
 _PRETTY_BASE = {"rsi": "RSI", "stoch_rsi": "StochRSI", "stoch": "Stoch", "williams": "Williams%R",
                 "cci": "CCI", "roc": "ROC", "bb_pctb": "Boll %B", "keltner_pos": "Keltner",
                 "atr_pct": "ATR%", "sma_dist": "SMA", "supertrend": "Supertrend", "mfi": "MFI",
-                "obv_slope": "OBV", "vwap_dist": "VWAP", "cvd_slope": "CVD"}
+                "obv_slope": "OBV", "vwap_dist": "VWAP", "cvd_slope": "CVD",
+                "ema_dist": "EMA dist", "ema_slope": "EMA vel"}
 
 
 def _pretty(name):
     if name in _PRETTY:
         return _PRETTY[name]
-    m = re.fullmatch(r"([a-z_]+?)_(\d+)", name or "")   # swept name -> e.g. RSI(15)
-    if m and m.group(1) in _PRETTY_BASE:
-        return f"{_PRETTY_BASE[m.group(1)]}({m.group(2)})"
-    return name
+    m = re.fullmatch(r"([a-z_]+?)_(\d+)", name or "")   # swept name -> e.g. RSI(15), EMA99 dist
+    if not m:
+        return name
+    fam, per = m.group(1), m.group(2)
+    if fam == "ema_dist":
+        return f"EMA{per} dist"
+    if fam == "ema_slope":
+        return f"EMA{per} vel"
+    return f"{_PRETTY_BASE[fam]}({per})" if fam in _PRETTY_BASE else name
 
 
 def _score(auc):

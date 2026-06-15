@@ -517,17 +517,25 @@ class MarketMonitor:
             self.notifier.send(fired_text(rule, info), reply_markup=ack_keyboard(rule["id"]))
 
     def _multi_tf(self, now: float) -> dict:
-        """RSI(14) + EMA trend per 5m/1h/4h/1d so the LLM sees each timeframe by name.
-        Cached ~3 min (these change slowly; keeps the per-scan loop light)."""
+        """Per timeframe (5m/15m/1h/4h/1d): RSI(14), EMA trend, and MOVING-AVERAGE readings —
+        price distance from EMA50/EMA200 and EMA50 velocity (slope) — so the LLM/operator sees
+        the MAs on each timeframe like a Binance overlay. Cached ~3 min (these move slowly)."""
         if self._mtf_cache and now - self._mtf_ts < 180:
             return self._mtf_cache
         out = {}
-        for tf in ("5m", "1h", "4h", "1d"):
+        for tf in ("5m", "15m", "1h", "4h", "1d"):
             try:
                 c = np.array(self.klines_fn(tf, 200), dtype=float)[:, 4]
-                slow = _ema(c, 21)
-                out[tf] = {"rsi_14": round(_rsi(c, 14), 1),
-                           "ema_trend_pct": round((_ema(c, 9) / slow - 1) * 100, 2) if slow else 0.0}
+                px = float(c[-1])
+                e9, e21, e50, e200 = _ema(c, 9), _ema(c, 21), _ema(c, 50), _ema(c, 200)
+                e50_prev = _ema(c[:-3], 50) if len(c) > 53 else e50    # EMA50 3 bars ago -> velocity
+                out[tf] = {
+                    "rsi_14": round(_rsi(c, 14), 1),
+                    "ema_trend_pct": round((e9 / e21 - 1) * 100, 2) if e21 else 0.0,
+                    "ema50_dist_pct": round((px / e50 - 1) * 100, 2) if e50 else 0.0,
+                    "ema200_dist_pct": round((px / e200 - 1) * 100, 2) if e200 else 0.0,
+                    "ema50_vel_pct": round((e50 / e50_prev - 1) * 100, 2) if e50_prev else 0.0,
+                }
             except Exception:  # noqa: BLE001 - skip a timeframe that fails
                 continue
         self._mtf_cache, self._mtf_ts = out, now

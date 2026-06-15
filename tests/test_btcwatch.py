@@ -1430,3 +1430,47 @@ def test_retune_weeks_controls_window(monkeypatch, tmp_path):
     bars_8w = seen["1h"]
     assert bars_8w > bars_4w        # more weeks -> a genuinely larger backtest window (was ignored before)
     assert json.load(open(tmp_path / "w.json"))["weeks"] == 8     # atomic write produced valid json
+
+
+# ── moving-average + MA-velocity metrics (price-vs-MA, slope) ──
+def test_tuner_and_battery_include_moving_averages():
+    from agent.signal_tuner import battery, _sweep, compute_one, _pretty
+    c = np.linspace(100, 120, 200)
+    o = h = l = c
+    v = np.full(200, 1000.0)
+    bat = battery(o, h, l, c, v)
+    for k in ("ema_dist_50", "ema_dist_200", "ema_slope_50", "sma_dist_50", "ema_cross_7_25"):
+        assert k in bat                                       # MAs surfaced in the live battery
+    sw = _sweep(o, h, l, c, v)
+    assert {"ema_dist_7", "ema_dist_25", "ema_dist_99", "ema_slope_99"} <= set(sw)   # swept lengths
+    assert np.isfinite(compute_one("ema_dist_99", o, h, l, c, v)[-1])   # a swept MA winner computes live
+    assert _pretty("ema_dist_99") == "EMA99 dist" and _pretty("ema_slope_50") == "EMA50 vel"
+
+
+def test_ma_metrics_are_alarmable():
+    from agent.alerts import canon_metric, resolve_metric
+    assert canon_metric("ma50") == "ema_dist_50" and canon_metric("ema200") == "ema_dist_200"
+    snap = {"technicals": {}, "indicators": {"ema_dist_50": 2.3, "ema_slope_50": 0.4}}
+    assert resolve_metric(snap, "ema50") == 2.3 and resolve_metric(snap, "ema_slope_50") == 0.4
+
+
+def test_multi_tf_has_15m_and_moving_averages(tmp_path):
+    cfg = WatchConfig(snapshot_path=str(tmp_path / "s.json"), state_path=str(tmp_path / "st.json"),
+                      tuned_signals_path=str(tmp_path / "none.json"), daily_update_tzs=(),
+                      user_alerts_path=str(tmp_path / "a.json"), prefs_path=str(tmp_path / "p.json"),
+                      alert_charts=False)
+    mon = MarketMonitor(cfg, notifier=FakeNotifier(), analyst=MockAnalyst(), price_fn=lambda: 1,
+                        klines_fn=lambda tf, lim: trend_klines(120), book_fn=lambda: {},
+                        ticker_fn=lambda: None, funding_fn=lambda: None, clock=lambda: 0.0)
+    mtf = mon._multi_tf(0.0)
+    assert "15m" in mtf and "5m" in mtf and "4h" in mtf          # 15m added
+    for k in ("ema50_dist_pct", "ema200_dist_pct", "ema50_vel_pct"):
+        assert k in mtf["1h"]                                    # MA readings per timeframe
+
+
+def test_nl_composite_ma_mode_returns_none_not_trio():
+    from agent.alerts import nl_to_composite
+    # MA metrics have no overbought/oversold 'mode' -> must NOT silently fabricate the default trio
+    for t in ("alert me when ema is in sell mode", "ema50 and ma200 in sell mode",
+              "moving average in sell mode", "sma in buy mode"):
+        assert nl_to_composite(t) is None, t

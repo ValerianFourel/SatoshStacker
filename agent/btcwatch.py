@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         import datetime
         from .signal_tuner import leaderboard_text, run_tune
         # default sweeps 5m/1h/4h/1d; --tf pins one. Live detector uses the trend-TF winner.
-        tfs = [args.tf] if args.tf else ["5m", "1h", "4h", "1d"]
+        tfs = [args.tf] if args.tf else ["5m", "15m", "1h", "4h", "1d"]
         live_tf = args.tf or cfg.trend_tf
         res = run_tune(cfg.symbol, timeframes=tfs, live_tf=live_tf,
                        weeks=args.weeks or cfg.tune_weeks,
