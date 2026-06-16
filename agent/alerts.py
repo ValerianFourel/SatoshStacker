@@ -297,11 +297,12 @@ def fired_text(rule: dict, info) -> str:
             f"now `{info:g}`   (#{rid})")
 
 
-def ack_keyboard(rule_id) -> dict:
-    """Inline keyboard attached to a fired alarm: acknowledge ('✓ Seen' -> snooze) or delete it."""
+def ack_keyboard(rule_id, coin: str = "btc") -> dict:
+    """Inline keyboard attached to a fired alarm: acknowledge ('✓ Seen' -> snooze) or delete it.
+    The coin is encoded so the listener routes the tap to that coin's alarm store."""
     return {"inline_keyboard": [[
-        {"text": "✓ Seen", "callback_data": f"ack:{rule_id}"},
-        {"text": "🗑 Delete", "callback_data": f"del:{rule_id}"}]]}
+        {"text": "✓ Seen", "callback_data": f"ack:{coin}:{rule_id}"},
+        {"text": "🗑 Delete", "callback_data": f"del:{coin}:{rule_id}"}]]}
 
 
 def describe_rule(rule: dict) -> str:
