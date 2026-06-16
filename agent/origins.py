@@ -30,7 +30,7 @@ CADENCE_STEP_S = 300       # ± 5 min per tap
 _KEYS = ("sensitivity", "muted", "overrides", "disabled", "confluence", "cadence",
          "alarm_cooldown")
 
-# callback_data scheme (all < 64 bytes): og:<action>[:<arg>]
+# callback_data scheme (all < 64 bytes): og:<coin>:<action>[:<arg>]
 P = "og"
 
 
@@ -38,7 +38,7 @@ def _preset_label(level: str) -> str:
     return {"low": "🟢 quiet", "normal": "🟡 balanced", "high": "🔴 chatty"}.get(level, level)
 
 
-def widget_text(prefs: dict) -> str:
+def widget_text(prefs: dict, coin: str = "btc") -> str:
     """The panel header — current confluence / cadence / preset / mute, in plain words.
     The per-origin on/off state is shown on the buttons themselves."""
     conf = max(1, int(prefs.get("confluence", 2)))
@@ -50,7 +50,7 @@ def widget_text(prefs: dict) -> str:
     conf_line = (f"need *≥{conf}* signals out-of-norm at once"
                  if conf > 1 else "*any single* signal can ping (off)")
     lines = [
-        "🛰️ *Update controls* — what pings you, and how often",
+        f"🛰️ *{coin.upper()} — update controls* — what pings you, and how often",
         f"🧩 Confluence: {conf_line}",
         f"⏱️ Cadence: at most *1 ping / {cad_m}m* (proactive)",
         f"🔔 Alarm cooldown: " + (f"*{acd_m}m* between re-fires of a trigger" if acd_m else "*off*"),
@@ -62,8 +62,8 @@ def widget_text(prefs: dict) -> str:
     return "\n".join(lines)
 
 
-def keyboard(prefs: dict) -> dict:
-    """Telegram inline_keyboard dict reflecting the current prefs."""
+def keyboard(prefs: dict, coin: str = "btc") -> dict:
+    """Telegram inline_keyboard dict reflecting the current prefs (callback data carries coin)."""
     conf = max(1, int(prefs.get("confluence", 2)))
     cad_m = int(prefs.get("cadence", 1800)) // 60
     acd_m = int(prefs.get("alarm_cooldown", 900)) // 60
@@ -74,41 +74,45 @@ def keyboard(prefs: dict) -> dict:
     def btn(text, data):
         return {"text": text, "callback_data": data}
 
+    def cb(s):                                # og:<coin>:<action...>
+        return f"{P}:{coin}:{s}"
+
     rows = [
-        [btn("➖", f"{P}:c:-"), btn(f"🧩 confluence ≥{conf}", f"{P}:r"), btn("➕", f"{P}:c:+")],
-        [btn("➖", f"{P}:d:-"), btn(f"⏱️ cadence {cad_m}m", f"{P}:r"), btn("➕", f"{P}:d:+")],
-        [btn("➖", f"{P}:a:-"), btn(f"🔔 alarm cooldown {acd_m}m", f"{P}:r"), btn("➕", f"{P}:a:+")],
+        [btn("➖", cb("c:-")), btn(f"🧩 confluence ≥{conf}", cb("r")), btn("➕", cb("c:+"))],
+        [btn("➖", cb("d:-")), btn(f"⏱️ cadence {cad_m}m", cb("r")), btn("➕", cb("d:+"))],
+        [btn("➖", cb("a:-")), btn(f"🔔 alarm cooldown {acd_m}m", cb("r")), btn("➕", cb("a:+"))],
     ]
     # origin toggles, two per row
     pair = []
     for canon, emoji, label in ORIGINS:
         mark = "🚫" if canon in disabled else "✅"
-        pair.append(btn(f"{mark} {emoji} {label}", f"{P}:t:{canon}"))
+        pair.append(btn(f"{mark} {emoji} {label}", cb(f"t:{canon}")))
         if len(pair) == 2:
             rows.append(pair)
             pair = []
     if pair:
         rows.append(pair)
-    rows.append([btn(f"🎚️ {_preset_label(level)}", f"{P}:p"),
-                 btn("🔇 muted — unmute" if muted else "🔔 live — mute", f"{P}:m")])
-    rows.append([btn("✖️ close", f"{P}:x")])
+    rows.append([btn(f"🎚️ {_preset_label(level)}", cb("p")),
+                 btn("🔇 muted — unmute" if muted else "🔔 live — mute", cb("m"))])
+    rows.append([btn("✖️ close", cb("x"))])
     return {"inline_keyboard": rows}
 
 
 def apply_callback(data: str, prefs: dict) -> tuple[dict | None, str]:
-    """Apply a button tap to a prefs dict. Returns (updated_prefs | None, toast).
-    None => no change to persist (refresh/close/unknown)."""
+    """Apply a button tap (og:<coin>:<action>[:<arg>]) to a prefs dict. Returns
+    (updated_prefs | None, toast). None => no change to persist (refresh/close/unknown).
+    Coin routing is the caller's job; this only mutates the passed prefs."""
     p = dict(prefs)
     p["disabled"] = list(p.get("disabled") or [])
     p["confluence"] = max(1, int(p.get("confluence", 2)))
     p["cadence"] = int(p.get("cadence", 1800))
     p["alarm_cooldown"] = int(p.get("alarm_cooldown", 900))
     parts = (data or "").split(":")
-    if len(parts) < 2 or parts[0] != P:
+    if len(parts) < 3 or parts[0] != P:
         return None, ""
-    action = parts[1]
-    if action == "t" and len(parts) >= 3:
-        canon = parts[2]
+    action = parts[2]                         # parts[1] is the coin (handled by the caller)
+    if action == "t" and len(parts) >= 4:
+        canon = parts[3]
         if canon not in _LABEL:
             return None, ""
         dis = set(p["disabled"])

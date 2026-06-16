@@ -22,7 +22,9 @@ from .scratch import Scratch, ScratchError
 log = logging.getLogger("satoshistacker.analyst")
 
 _SYSTEM = (
-    "You are a precise BTC market analyst for one operator. You receive a "
+    "You are a precise crypto market analyst for one operator. The `symbol` field says which "
+    "asset this snapshot is for (e.g. BTC/USDT, or XMR/USDT which trades on the perp market) — "
+    "analyze THAT asset and name it. You receive a "
     "TIMEFRAME-LABELLED snapshot of computed numbers. Read each key's timeframe "
     "carefully and NEVER mix them up (a 5m reading is not a daily one):\n"
     "• `as_of_time` — when this data is from; anchor everything to it, flag if stale.\n"
@@ -123,6 +125,7 @@ def _features(m: dict) -> dict:
     t = m.get("technicals", {})
     tf = m.get("time", {}).get("trend_tf", "1h")
     return {
+        "symbol": m.get("symbol", "BTC/USDT"),     # which asset (BTC, XMR, …) — analyze THIS one
         "as_of_time": m.get("time", {}),
         "price_now": m.get("price"),
         "returns_pct": {"1m": t.get("ret_1m_pct"), "5m": t.get("ret_5m_pct"),
@@ -338,12 +341,12 @@ class LLMAnalyst:
         auto-attached; one search round allowed. The reply MUST start with 'ALERT:' (worth
         pinging) or 'QUIET:' (cache only). Conservative by design; fail-safe to QUIET."""
         payload = {"task": "news_digest", "state": _features(m), "instruction": (
-            "Read the latest BTC news + sentiment (auto-attached); if useful run ONE search "
-            "for fresh context. Summarize the key developments in <=120 words. Then DECIDE "
-            "whether anything is significant enough to PROACTIVELY alert the operator (who is "
-            "accumulating BTC and bearish on USD price). Begin your `reply` with 'ALERT:' if "
-            "yes, otherwise 'QUIET:'. Be conservative — only ALERT on genuinely market-moving "
-            "news (ETF flows, regulation, macro shocks, large liquidations, hacks).")}
+            "Read the latest news + sentiment for THIS asset (see state.symbol — BTC, XMR, …; "
+            "auto-attached); if useful run ONE search for fresh context. Summarize the key "
+            "developments in <=120 words. Then DECIDE whether anything is significant enough to "
+            "PROACTIVELY alert the operator. Begin your `reply` with 'ALERT:' if yes, otherwise "
+            "'QUIET:'. Be conservative — only ALERT on genuinely market-moving news (flows, "
+            "regulation, macro shocks, large liquidations, hacks, exchange listings/delistings).")}
         return self._respond(payload, fallback="QUIET: news read unavailable")
 
     def parse_alarm(self, text: str, m: dict, history=None):

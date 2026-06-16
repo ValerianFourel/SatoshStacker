@@ -460,12 +460,13 @@ class MarketMonitor:
         self.notifier = notifier
         self.analyst = analyst
         self.clock = clock
-        self.price_fn = price_fn or (lambda: exchange.public_price(cfg.symbol))
+        mkt = cfg.market                       # 'spot' (BTC) or 'futures' (XMR — spot delisted)
+        self.price_fn = price_fn or (lambda: exchange.public_price(cfg.symbol, market=mkt))
         self.klines_fn = klines_fn or (
-            lambda tf, lim: exchange.public_klines(cfg.symbol, tf, lim))
+            lambda tf, lim: exchange.public_klines(cfg.symbol, tf, lim, market=mkt))
         self.book_fn = book_fn or (
-            lambda: exchange.public_order_book(cfg.symbol, cfg.book_limit))
-        self.ticker_fn = ticker_fn or (lambda: exchange.public_ticker_24h(cfg.symbol))
+            lambda: exchange.public_order_book(cfg.symbol, cfg.book_limit, market=mkt))
+        self.ticker_fn = ticker_fn or (lambda: exchange.public_ticker_24h(cfg.symbol, market=mkt))
         self.funding_fn = funding_fn or (lambda: exchange.public_funding_oi(cfg.symbol))
         self.detector = AnomalyDetector(cfg)
         self._prefs_mtime: float = -2.0
@@ -514,7 +515,8 @@ class MarketMonitor:
         if before != [(r.get("armed", True), r.get("last_fired")) for r in rules]:
             self.alerts.save(rules)        # persist arm/disarm/last_fired only when it changed
         for rule, info in fired:           # each ping carries a ✓ Seen / 🗑 Delete button
-            self.notifier.send(fired_text(rule, info), reply_markup=ack_keyboard(rule["id"]))
+            self.notifier.send(fired_text(rule, info),
+                               reply_markup=ack_keyboard(rule["id"], coin=self.cfg.coin))
 
     def _multi_tf(self, now: float) -> dict:
         """Per timeframe (5m/15m/1h/4h/1d): RSI(14), EMA trend, and MOVING-AVERAGE readings —
@@ -613,7 +615,8 @@ class MarketMonitor:
         body = reply.split(":", 1)[-1].strip() if ":" in reply.split("\n", 1)[0] else reply.strip()
         self._cache_news_digest(now_ts, reply, body, decided_alert)
         if decided_alert and body and not self.detector.muted:
-            self.notifier.send(f"📰 *BTC news watch* — worth flagging\n{body}")
+            asset = self.cfg.symbol.split("/")[0]
+            self.notifier.send(f"📰 *{asset} news watch* — worth flagging\n{body}")
 
     def _cache_news_digest(self, now_ts: float, reply: str, body: str, alert: bool) -> None:
         try:
@@ -626,13 +629,14 @@ class MarketMonitor:
 
     def _send_daily_update(self, m: dict, tzname: str, local) -> None:
         from .analyst import numeric_summary
+        asset = self.cfg.symbol.split("/")[0]
         city = tzname.split("/")[-1].replace("_", " ")
-        head = f"🗓️ *Daily BTC briefing* — 9:00 {city} ({local:%a %d %b})"
+        head = f"🗓️ *Daily {asset} briefing* — 9:00 {city} ({local:%a %d %b})"
         read = ""
         if self.cfg.analyst_enabled and self.analyst is not None:
             try:
                 read = self.analyst.answer(
-                    "Daily BTC briefing: trend & key levels (note timeframes), funding/OI, "
+                    f"Daily {asset} briefing: trend & key levels (note timeframes), funding/OI, "
                     "day/week/month sentiment, and anything notable since yesterday.", m)
             except Exception as e:  # noqa: BLE001
                 log.warning("daily briefing LLM failed: %s", e)
@@ -670,7 +674,8 @@ class MarketMonitor:
                             order_book=book, cfg=self.cfg, now_ts=now, tuned=tuned,
                             ticker24=ticker24, funding=funding)
         m["multi_tf"] = self._multi_tf(now)        # RSI/trend per 5m/1h/4h/1d (cached)
-        m["onchain"] = self._onchain(now)          # MVRV/NUPL/SOPR/netflow (cached ~4h)
+        # on-chain (CryptoQuant) is BTC-only — never attach BTC metrics to another coin (e.g. XMR)
+        m["onchain"] = self._onchain(now) if self.cfg.coin == "btc" else {}
         fired = self.detector.evaluate(m, now_ts=now)
         m["events"] = [s.name for s in fired]
         _atomic_write_json(self.cfg.snapshot_path, m)
@@ -688,7 +693,8 @@ class MarketMonitor:
 
     def _handle_events(self, m: dict, fired: list[Signal]) -> None:
         log.info("anomaly fired: %s", ", ".join(s.name for s in fired))
-        head = (f"🚨 *BTC alert* — {self._TITLE.get(fired[0].kind, 'unusual behaviour')}"
+        asset = self.cfg.symbol.split("/")[0]
+        head = (f"🚨 *{asset} alert* — {self._TITLE.get(fired[0].kind, 'unusual behaviour')}"
                 f"  ·  `${m.get('price', 0):,.0f}`")
         triggers = "\n".join(f"{self._ICON.get(s.kind, '•')} {s.detail}" for s in fired)
         body = f"{head}\n{triggers}"

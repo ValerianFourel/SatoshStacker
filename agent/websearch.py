@@ -46,12 +46,14 @@ def _as_date(x) -> datetime.date | None:
         return None
 
 
-def fetch_news(max_items: int = 6) -> dict:
-    """BTC headlines (Yahoo RSS) + Fear&Greed with day/week/month sentiment. No key."""
+def fetch_news(max_items: int = 6, *, asset: str = "BTC") -> dict:
+    """``asset`` headlines (Yahoo RSS for <asset>-USD) + Fear&Greed day/week/month sentiment.
+    No key. Fear&Greed is the crypto-market-wide index (BTC-driven) — a general gauge even
+    for alts like XMR."""
     out: dict = {"headlines": [], "fear_greed": None, "sentiment": None}
     try:
         r = requests.get("https://feeds.finance.yahoo.com/rss/2.0/headline",
-                         params={"s": "BTC-USD", "region": "US", "lang": "en-US"},
+                         params={"s": f"{asset}-USD", "region": "US", "lang": "en-US"},
                          headers=_UA, timeout=10)
         root = ET.fromstring(r.text)
         out["headlines"] = [(it.findtext("title") or "").strip()
@@ -278,10 +280,12 @@ def search_and_read(query: str, *, max_results: int = 5, fetch_n: int = 2,
 
 
 class NewsCache:
-    """TTL cache so the bot doesn't refetch news on every scan/question."""
+    """TTL cache so the bot doesn't refetch news on every scan/question. ``asset`` picks the
+    headline feed (BTC, XMR, …)."""
 
-    def __init__(self, ttl_s: int = 600, *, clock=time.time) -> None:
+    def __init__(self, ttl_s: int = 600, *, asset: str = "BTC", clock=time.time) -> None:
         self.ttl_s = ttl_s
+        self.asset = asset
         self._clock = clock
         self._at = 0.0
         self._data: dict = {}
@@ -290,7 +294,7 @@ class NewsCache:
         now = self._clock()
         if now - self._at >= self.ttl_s or not self._data:
             try:
-                self._data = fetch_news()
+                self._data = fetch_news(asset=self.asset)
                 self._at = now
             except Exception:  # noqa: BLE001 - reuse last on failure
                 pass

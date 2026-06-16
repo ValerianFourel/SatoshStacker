@@ -137,7 +137,8 @@ def build_derivs_chart(cfg, *, klines_fn=None, derivs_fn=None,
     period = timeframe if timeframe in TF_CHOICES else (
         cfg.trend_tf if cfg.trend_tf in TF_CHOICES else "1h")
     if klines_fn is None:
-        klines_fn = lambda tf, lim: public_klines(cfg.symbol, tf, lim)  # noqa: E731
+        mkt = getattr(cfg, "market", "spot")
+        klines_fn = lambda tf, lim: public_klines(cfg.symbol, tf, lim, market=mkt)  # noqa: E731
     if derivs_fn is None:
         derivs_fn = lambda: public_derivs_history(cfg.symbol, period=period, limit=96)  # noqa: E731
     kl = klines_fn(period, 96)
@@ -148,9 +149,10 @@ def build_derivs_chart(cfg, *, klines_fn=None, derivs_fn=None,
         ("long/short", d.get("long_short_ratio", []), 1.0),
         ("taker buy/sell", d.get("taker_buy_sell", []), 1.0),
     ]
+    asset = getattr(cfg, "symbol", "BTC/USDT").split("/")[0]
     png = render_series_chart(
-        f"BTC derivatives ({period}) — funding · OI · long/short · taker flow", kl, panels)
-    cap = ("📉 *BTC derivatives* — funding, open interest, long/short ratio, taker buy/sell "
+        f"{asset} derivatives ({period}) — funding · OI · long/short · taker flow", kl, panels)
+    cap = (f"📉 *{asset} derivatives* — funding, open interest, long/short ratio, taker buy/sell "
            f"(`{period}`, Binance perp). _Liquidation map needs a Coinglass key._")
     return png, cap
 
@@ -167,7 +169,8 @@ def build_btc_chart(cfg, tuned: dict | None, *, snapshot: dict | None = None,
     import numpy as np
     if klines_fn is None:
         from .exchange import public_klines
-        klines_fn = lambda tf, lim: public_klines(cfg.symbol, tf, lim)  # noqa: E731
+        mkt = getattr(cfg, "market", "spot")
+        klines_fn = lambda tf, lim: public_klines(cfg.symbol, tf, lim, market=mkt)  # noqa: E731
     tf = timeframe if timeframe in TF_CHOICES else cfg.trend_tf
     kl = klines_fn(tf, 180)
     a = np.array(kl, dtype=float)
@@ -197,7 +200,8 @@ def build_btc_chart(cfg, tuned: dict | None, *, snapshot: dict | None = None,
                                      "24h low": (t.get("low_24h"), "#5cb85c")}.items()
                  if vv[0]}
     src = "LLM-picked" if indicators else "backtest-leading"
-    title = f"BTC {tf} — price + {', '.join(_pretty(n) for n in names)}"
+    asset = getattr(cfg, "symbol", "BTC/USDT").split("/")[0]
+    title = f"{asset} {tf} — price + {', '.join(_pretty(n) for n in names)}"
     png = render_chart(kl, title=title, panels=panels, marks=marks)
-    cap = "📈 *BTC* — " + " · ".join(_pretty(n) for n in names) + f"  (`{tf}`, {src})"
+    cap = f"📈 *{asset}* — " + " · ".join(_pretty(n) for n in names) + f"  (`{tf}`, {src})"
     return png, cap

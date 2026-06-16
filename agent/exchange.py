@@ -21,6 +21,14 @@ from typing import Callable
 import requests
 
 _BINANCE_PUBLIC = "https://api.binance.com/api/v3/ticker/price"
+_SPOT_BASE = "https://api.binance.com/api/v3"
+_FUT_BASE = "https://fapi.binance.com/fapi/v1"
+
+
+def _api_base(market: str) -> str:
+    """Spot REST base, or USDⓈ-M futures base when ``market='futures'`` (e.g. XMR, whose
+    spot is delisted but whose perp is live). The endpoint paths + payload shapes match."""
+    return _FUT_BASE if market == "futures" else _SPOT_BASE
 
 
 def binance_symbol(symbol: str) -> str:
@@ -28,12 +36,13 @@ def binance_symbol(symbol: str) -> str:
     return symbol.replace("/", "")
 
 
-def public_price(symbol: str, *, timeout: float = 8.0) -> float:
+def public_price(symbol: str, *, timeout: float = 8.0, market: str = "spot") -> float:
     """Last trade price from Binance public API (no key). Falls back USDC->USDT."""
     bs = binance_symbol(symbol)
     for sym in (bs, bs.replace("USDC", "USDT")):
         try:
-            r = requests.get(_BINANCE_PUBLIC, params={"symbol": sym}, timeout=timeout)
+            r = requests.get(_api_base(market) + "/ticker/price",
+                             params={"symbol": sym}, timeout=timeout)
             r.raise_for_status()
             return float(r.json()["price"])
         except Exception:  # noqa: BLE001 - try the fallback symbol
@@ -42,13 +51,13 @@ def public_price(symbol: str, *, timeout: float = 8.0) -> float:
 
 
 def public_ohlcv(symbol: str, timeframe: str = "4h", limit: int = 200,
-                 *, timeout: float = 10.0) -> list[list[float]]:
+                 *, timeout: float = 10.0, market: str = "spot") -> list[list[float]]:
     """Recent [open, high, low, close] candles from Binance public API (no key).
     Market data is identical for testnet/live, so the trader uses this for momentum."""
     bs = binance_symbol(symbol)
     for sym in (bs, bs.replace("USDC", "USDT")):
         try:
-            r = requests.get("https://api.binance.com/api/v3/klines",
+            r = requests.get(_api_base(market) + "/klines",
                              params={"symbol": sym, "interval": timeframe, "limit": limit},
                              timeout=timeout)
             r.raise_for_status()
@@ -59,7 +68,7 @@ def public_ohlcv(symbol: str, timeframe: str = "4h", limit: int = 200,
 
 
 def public_klines(symbol: str, timeframe: str = "1m", limit: int = 200,
-                  *, timeout: float = 10.0) -> list[list[float]]:
+                  *, timeout: float = 10.0, market: str = "spot") -> list[list[float]]:
     """Recent [open_time_ms, open, high, low, close, volume] candles (no key).
 
     Like ``public_ohlcv`` but keeps the open-time and base-asset volume, which the
@@ -67,7 +76,7 @@ def public_klines(symbol: str, timeframe: str = "1m", limit: int = 200,
     bs = binance_symbol(symbol)
     for sym in (bs, bs.replace("USDC", "USDT")):
         try:
-            r = requests.get("https://api.binance.com/api/v3/klines",
+            r = requests.get(_api_base(market) + "/klines",
                              params={"symbol": sym, "interval": timeframe, "limit": limit},
                              timeout=timeout)
             r.raise_for_status()
@@ -79,13 +88,13 @@ def public_klines(symbol: str, timeframe: str = "1m", limit: int = 200,
 
 
 def public_order_book(symbol: str, limit: int = 100,
-                      *, timeout: float = 8.0) -> dict[str, list[list[float]]]:
+                      *, timeout: float = 8.0, market: str = "spot") -> dict[str, list[list[float]]]:
     """L2 order book {"bids":[[price,qty],...], "asks":[...]} from Binance (no key).
     Bids are descending, asks ascending (Binance order). Falls back USDC->USDT."""
     bs = binance_symbol(symbol)
     for sym in (bs, bs.replace("USDC", "USDT")):
         try:
-            r = requests.get("https://api.binance.com/api/v3/depth",
+            r = requests.get(_api_base(market) + "/depth",
                              params={"symbol": sym, "limit": limit}, timeout=timeout)
             r.raise_for_status()
             d = r.json()
@@ -96,13 +105,13 @@ def public_order_book(symbol: str, limit: int = 100,
     raise RuntimeError(f"could not fetch public order book for {symbol}")
 
 
-def public_ticker_24h(symbol: str, *, timeout: float = 8.0) -> dict:
+def public_ticker_24h(symbol: str, *, timeout: float = 8.0, market: str = "spot") -> dict:
     """Binance OFFICIAL rolling-24h stats (no key) — the authoritative, time-correct
     24h high/low/change/volume (don't approximate these from candle windows)."""
     bs = binance_symbol(symbol)
     for sym in (bs, bs.replace("USDC", "USDT")):
         try:
-            r = requests.get("https://api.binance.com/api/v3/ticker/24hr",
+            r = requests.get(_api_base(market) + "/ticker/24hr",
                              params={"symbol": sym}, timeout=timeout)
             r.raise_for_status()
             d = r.json()

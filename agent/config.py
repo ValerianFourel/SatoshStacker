@@ -122,6 +122,8 @@ class WatchConfig:
     dir but never to the repo or the exchange.
     """
     symbol: str = "BTC/USDT"              # USDT for the deepest public order book
+    coin: str = "btc"                     # short name (btc, xmr) — namespaces state + chat routing
+    market: str = "spot"                  # 'spot' or 'futures' (XMR's spot is delisted; perp is live)
     scan_interval_s: int = 15             # how often to refresh metrics + check anomalies
     kline_tf: str = "1m"                  # fast candles for spikes/volume/vol
     kline_limit: int = 240                # ~4h of 1m candles
@@ -229,6 +231,28 @@ class WatchConfig:
             sensitivity=os.getenv("WATCH_SENSITIVITY", "low").lower(),
             rearm_clear_s=_i("WATCH_REARM_CLEAR_S", 600),
         )
+
+
+def coin_config(base: "WatchConfig", *, coin: str, symbol: str, market: str) -> "WatchConfig":
+    """Derive a per-coin WatchConfig. The FIRST coin (btc) keeps ``base``'s existing state
+    paths (so the live BTC state isn't migrated); any OTHER coin gets its own namespaced state
+    files alongside, so the two watch loops never clobber each other."""
+    import dataclasses
+    import os
+    if coin == base.coin:                       # the base coin (btc) — keep its existing paths
+        return dataclasses.replace(base, coin=coin, symbol=symbol, market=market)
+    d = os.path.dirname(base.snapshot_path) or "state"
+    td = os.path.dirname(base.tuned_signals_path) or d
+    return dataclasses.replace(
+        base, coin=coin, symbol=symbol, market=market,
+        snapshot_path=f"{d}/{coin}_snapshot.json",
+        state_path=f"{d}/{coin}_watch_state.json",
+        onboarded_marker=f"{d}/{coin}_watch_onboarded",
+        upgrade_marker=f"{d}/{coin}_watch_confluence_upgrade",
+        prefs_path=f"{d}/{coin}_watch_prefs.json",
+        user_alerts_path=f"{d}/{coin}_user_alerts.json",
+        tuned_signals_path=f"{td}/{coin}_watch_signals.json",
+        news_digest_path=f"{d}/{coin}_news_digest.json")
 
 
 @dataclass(frozen=True)

@@ -310,7 +310,7 @@ def test_newscache_ttl(monkeypatch):
     import agent.websearch as ws
     n = {"v": 0}
 
-    def fake_fetch(max_items=6):
+    def fake_fetch(max_items=6, *, asset="BTC"):
         n["v"] += 1
         return {"headlines": [f"h{n['v']}"], "fear_greed": None}
 
@@ -876,29 +876,29 @@ def test_origins_widget_text_and_keyboard():
     prefs = {"sensitivity": "high", "muted": False, "overrides": {}, "disabled": [],
              "confluence": 2, "cadence": 1800}
     txt = widget_text(prefs)
-    assert "Update controls" in txt and "Confluence" in txt and "≥2" in txt and "30m" in txt
-    flat = [b["callback_data"] for row in keyboard(prefs)["inline_keyboard"] for b in row]
+    assert "update controls" in txt and "BTC" in txt and "Confluence" in txt and "≥2" in txt
+    flat = [b["callback_data"] for row in keyboard(prefs, "btc")["inline_keyboard"] for b in row]
     for canon, _e, _l in ORIGINS:
-        assert f"og:t:{canon}" in flat                           # every origin is a toggle
-    assert "og:c:+" in flat and "og:d:-" in flat and "og:x" in flat
+        assert f"og:btc:t:{canon}" in flat                       # every origin is a toggle
+    assert "og:btc:c:+" in flat and "og:btc:d:-" in flat and "og:btc:x" in flat
 
 
 def test_origins_apply_callback_toggle_and_clamps():
     from agent.origins import apply_callback
     prefs = {"sensitivity": "low", "muted": False, "overrides": {}, "disabled": [],
              "confluence": 2, "cadence": 1800}
-    off, toast = apply_callback("og:t:book_imbalance", prefs)
+    off, toast = apply_callback("og:btc:t:book_imbalance", prefs)
     assert "book_imbalance" in off["disabled"] and "silenced" in toast
-    on, _ = apply_callback("og:t:book_imbalance", off)
+    on, _ = apply_callback("og:btc:t:book_imbalance", off)
     assert "book_imbalance" not in on["disabled"]
-    assert apply_callback("og:c:+", prefs)[0]["confluence"] == 3
-    lo = apply_callback("og:c:-", prefs)[0]
-    assert lo["confluence"] == 1 and apply_callback("og:c:-", lo)[0]["confluence"] == 1   # clamp
-    assert apply_callback("og:d:-", prefs)[0]["cadence"] == 1500          # -5 min
-    assert apply_callback("og:p", prefs)[0]["sensitivity"] == "normal"    # cycle preset
-    assert apply_callback("og:m", prefs)[0]["muted"] is True
-    assert apply_callback("og:r", prefs) == (None, "")                    # refresh -> no change
-    assert apply_callback("og:x", prefs)[0] is None                       # close -> no change
+    assert apply_callback("og:xmr:c:+", prefs)[0]["confluence"] == 3      # coin segment ignored by apply
+    lo = apply_callback("og:btc:c:-", prefs)[0]
+    assert lo["confluence"] == 1 and apply_callback("og:btc:c:-", lo)[0]["confluence"] == 1  # clamp
+    assert apply_callback("og:btc:d:-", prefs)[0]["cadence"] == 1500      # -5 min
+    assert apply_callback("og:btc:p", prefs)[0]["sensitivity"] == "normal"  # cycle preset
+    assert apply_callback("og:btc:m", prefs)[0]["muted"] is True
+    assert apply_callback("og:btc:r", prefs) == (None, "")               # refresh -> no change
+    assert apply_callback("og:btc:x", prefs)[0] is None                  # close -> no change
     assert apply_callback("bogus", prefs)[0] is None
 
 
@@ -969,17 +969,17 @@ def test_listener_origins_and_digest_routing(tmp_path, monkeypatch):
     lis = TelegramListener(WatchConfig(prefs_path=p, news_digest_path=str(tmp_path / "nd.json")),
                            token="t", chat_id="42", analyst=MockAnalyst(),
                            notifier=FakeNotifier(), snapshot_fn=lambda: {})
-    assert "Update controls" in lis.handle_text("/origins")      # text view
+    assert "update controls" in lis.handle_text("/origins")      # text view
     assert "no autonomous digest" in lis.handle_text("/digest")  # nothing cached yet
     # a button tap from the operator persists to the same prefs file
-    lis._handle_callback({"id": "1", "data": "og:t:book_imbalance",
+    lis._handle_callback({"id": "1", "data": "og:btc:t:book_imbalance",
                           "message": {"chat": {"id": 42}, "message_id": 7}})
     assert "book_imbalance" in read_prefs(p)["disabled"]
-    lis._handle_callback({"id": "2", "data": "og:c:+",
+    lis._handle_callback({"id": "2", "data": "og:btc:c:+",
                           "message": {"chat": {"id": 42}, "message_id": 7}})
     assert read_prefs(p)["confluence"] == 3
     # a tap from a stranger changes nothing
-    lis._handle_callback({"id": "3", "data": "og:c:+",
+    lis._handle_callback({"id": "3", "data": "og:btc:c:+",
                           "message": {"chat": {"id": 999}, "message_id": 7}})
     assert read_prefs(p)["confluence"] == 3
     # the /origins command sends an interactive panel (sendMessage hit)
@@ -1315,7 +1315,7 @@ def test_alert_cooldown_zero_preserves_old_behaviour():
 def test_ack_keyboard_structure():
     from agent.alerts import ack_keyboard
     datas = [b["callback_data"] for row in ack_keyboard(7)["inline_keyboard"] for b in row]
-    assert datas == ["ack:7", "del:7"]
+    assert datas == ["ack:btc:7", "del:btc:7"]
 
 
 def test_monitor_attaches_ack_keyboard_to_fired_alarm(tmp_path):
@@ -1332,7 +1332,7 @@ def test_monitor_attaches_ack_keyboard_to_fired_alarm(tmp_path):
     mon._check_user_alerts({"technicals": {"rsi_14": 80}})
     assert any("Trigger fired" in s for s in note.sent)
     datas = [b["callback_data"] for row in note.markups[-1]["inline_keyboard"] for b in row]
-    assert "ack:1" in datas and "del:1" in datas
+    assert "ack:btc:1" in datas and "del:btc:1" in datas
 
 
 def test_listener_alarm_ack_snoozes_and_delete_removes(tmp_path, monkeypatch):
@@ -1367,9 +1367,9 @@ def test_origins_alarm_cooldown_control():
              "confluence": 2, "cadence": 1800, "alarm_cooldown": 900}
     assert "alarm cooldown" in widget_text(prefs).lower()
     flat = [b["callback_data"] for row in keyboard(prefs)["inline_keyboard"] for b in row]
-    assert "og:a:+" in flat and "og:a:-" in flat
-    assert apply_callback("og:a:+", prefs)[0]["alarm_cooldown"] == 1200    # +5 min
-    assert apply_callback("og:a:-", prefs)[0]["alarm_cooldown"] == 600     # -5 min
+    assert "og:btc:a:+" in flat and "og:btc:a:-" in flat
+    assert apply_callback("og:btc:a:+", prefs)[0]["alarm_cooldown"] == 1200    # +5 min
+    assert apply_callback("og:btc:a:-", prefs)[0]["alarm_cooldown"] == 600     # -5 min
 
 
 # ── parameter-sweep retune (rsi(14) -> rsi(15) etc.) + /retune command ──
@@ -1400,7 +1400,7 @@ def test_retune_runs_and_reports(monkeypatch):
     lis = TelegramListener(WatchConfig(tuned_signals_path="x.json"), token="t", chat_id="42",
                            analyst=MockAnalyst(), notifier=note, snapshot_fn=lambda: {})
     lis._tuning = True                                     # set by _start_retune in prod
-    lis._do_retune(8.0)                                    # run synchronously (no thread race)
+    lis._do_retune(8.0, lis.cfg)                           # run synchronously (no thread race)
     assert any("Retune complete" in s and "LEADERBOARD" in s for s in note.sent)
     assert lis._tuning is False
 
@@ -1417,7 +1417,7 @@ def test_retune_weeks_controls_window(monkeypatch, tmp_path):
     import agent.signal_tuner as st
     seen = {}
 
-    def fake_klines(symbol, tf, bars):
+    def fake_klines(symbol, tf, bars, *, market="spot", **kw):
         seen[tf] = bars
         return [[float(i), 100 + (i % 7), 101 + (i % 7), 99 + (i % 7), 100 + (i % 7), 1000.0]
                 for i in range(bars)]
@@ -1516,3 +1516,132 @@ def test_listener_chart_command_passes_timeframe(monkeypatch):
                            notifier=FakeNotifier(), snapshot_fn=lambda: {"price": 1})
     assert lis.handle_text("/chart 4h rsi") == ""
     assert captured["tf"] == "4h" and "rsi" in captured["q"]
+
+
+# ── XMR / multi-coin support ──
+def test_exchange_market_routes_spot_vs_futures(monkeypatch):
+    import agent.exchange as ex
+    urls = []
+
+    class _R:
+        def raise_for_status(self): pass
+        def json(self): return {"price": "335.0"}
+    monkeypatch.setattr(ex.requests, "get", lambda url, **k: (urls.append(url), _R())[1])
+    assert ex.public_price("XMR/USDT", market="futures") == 335.0
+    assert any("fapi.binance.com" in u for u in urls)            # futures -> fapi
+    urls.clear()
+    ex.public_price("BTC/USDT", market="spot")
+    assert any("api.binance.com/api/v3" in u for u in urls) and not any("fapi" in u for u in urls)
+
+
+def test_coin_config_namespaces_xmr_only(tmp_path):
+    from agent.config import WatchConfig, coin_config
+    base = WatchConfig(snapshot_path=str(tmp_path / "btc_snapshot.json"),
+                       prefs_path=str(tmp_path / "watch_prefs.json"),
+                       user_alerts_path=str(tmp_path / "user_alerts.json"),
+                       tuned_signals_path=str(tmp_path / "watch_signals.json"))
+    btc = coin_config(base, coin="btc", symbol="BTC/USDT", market="spot")
+    xmr = coin_config(base, coin="xmr", symbol="XMR/USDT", market="futures")
+    assert btc.prefs_path == base.prefs_path and btc.market == "spot"   # btc keeps existing paths
+    assert xmr.market == "futures" and xmr.symbol == "XMR/USDT"
+    assert "xmr_" in xmr.prefs_path and "xmr_" in xmr.user_alerts_path
+    assert "xmr_" in xmr.snapshot_path and "xmr_" in xmr.tuned_signals_path
+    assert xmr.prefs_path != base.prefs_path                            # isolated from btc
+
+
+def test_fetch_news_uses_asset(monkeypatch):
+    import agent.websearch as ws
+    seen = {}
+
+    class _R:
+        text = "<rss></rss>"
+        def raise_for_status(self): pass
+        def json(self): return {"data": []}
+
+    def fake_get(url, params=None, **k):
+        if params and "s" in params:
+            seen["s"] = params["s"]
+        return _R()
+    monkeypatch.setattr(ws.requests, "get", fake_get)
+    ws.fetch_news(asset="XMR")
+    assert seen["s"] == "XMR-USD"
+
+
+def _multicoin_listener(tmp_path):
+    from agent.alerts import AlertStore
+    from agent.config import WatchConfig, coin_config
+    from agent.telegram_listener import TelegramListener, _Coin
+    base = WatchConfig(snapshot_path=str(tmp_path / "btc_snapshot.json"),
+                       prefs_path=str(tmp_path / "btc_watch_prefs.json"),
+                       user_alerts_path=str(tmp_path / "btc_user_alerts.json"),
+                       tuned_signals_path=str(tmp_path / "btc_watch_signals.json"),
+                       memory_path=str(tmp_path / "m.jsonl"))
+    btc_cfg = coin_config(base, coin="btc", symbol="BTC/USDT", market="spot")
+    xmr_cfg = coin_config(base, coin="xmr", symbol="XMR/USDT", market="futures")
+    snaps = {"btc": {"symbol": "BTC/USDT", "price": 65000, "technicals": {"rsi_14": 55},
+                     "futures": {}, "volume": {}, "indicators": {}},
+             "xmr": {"symbol": "XMR/USDT", "price": 335, "technicals": {"rsi_14": 72},
+                     "futures": {}, "volume": {}, "indicators": {}}}
+    coins = {n: _Coin(n, c, MockAnalyst(), (lambda s=snaps[n]: s),
+                      AlertStore(c.user_alerts_path), None)
+             for n, c in (("btc", btc_cfg), ("xmr", xmr_cfg))}
+    lis = TelegramListener(btc_cfg, token="t", chat_id="42", analyst=coins["btc"].analyst,
+                           notifier=FakeNotifier(), snapshot_fn=coins["btc"].snapshot_fn, coins=coins)
+    return lis
+
+
+def test_listener_coin_routing(tmp_path):
+    lis = _multicoin_listener(tmp_path)
+    lis.handle_text("/xmr")                                   # bare coin -> that coin's status
+    assert lis._active == "xmr"
+    cap = {}
+    lis._send_charts = lambda snap, question=None, timeframe=None: cap.update(
+        tf=timeframe, active=lis._active) or 1
+    lis.handle_text("/chart xmr 4h")                          # coin token stripped, tf parsed
+    assert lis._active == "xmr" and cap["tf"] == "4h"
+    lis.handle_text("/alert xmr rsi > 80")                    # alarm lands in XMR's store only
+    assert lis.coins["xmr"].alerts.load() and not lis.coins["btc"].alerts.load()
+    out = lis.handle_text("/search btc etf flows")            # search query NOT mangled
+    assert "btc etf flows" in out and lis._active == "btc"
+    lis.handle_text("is xmr a top?")                          # plain text: detect coin, keep text
+    assert lis._active == "xmr"
+
+
+def test_listener_default_coin_backcompat(tmp_path):
+    lis = _multicoin_listener(tmp_path)
+    lis.handle_text("/status")                                # no coin -> default (btc)
+    assert lis._active == "btc"
+    lis.handle_text("is this a local top?")                  # no coin word -> default btc
+    assert lis._active == "btc"
+
+
+def test_xmr_monitor_no_onchain_and_coin_label(tmp_path):
+    from agent.config import WatchConfig, coin_config
+    from agent.market_monitor import MarketMonitor, Signal
+    base = WatchConfig(snapshot_path=str(tmp_path / "btc_snapshot.json"),
+                       state_path=str(tmp_path / "btc_state.json"),
+                       tuned_signals_path=str(tmp_path / "none.json"),
+                       user_alerts_path=str(tmp_path / "btc_a.json"),
+                       prefs_path=str(tmp_path / "btc_p.json"),
+                       daily_update_tzs=(), alert_charts=False, news_digest_hours=1e9)
+    xcfg = coin_config(base, coin="xmr", symbol="XMR/USDT", market="futures")
+    note = FakeNotifier()
+    mon = MarketMonitor(xcfg, notifier=note, analyst=MockAnalyst(), price_fn=lambda: 335.0,
+                        klines_fn=lambda tf, lim: trend_klines(start=300.0, end=340.0),
+                        book_fn=lambda: book(mid=335.0), ticker_fn=lambda: None,
+                        funding_fn=lambda: None, clock=lambda: 100.0)
+    m = mon.run_once()
+    assert m["symbol"] == "XMR/USDT"
+    assert m["onchain"] == {}                          # BTC on-chain must NOT leak into XMR
+    mon._handle_events({"price": 335, "symbol": "XMR/USDT"}, [Signal("peak", "peak", "test")])
+    assert any("XMR alert" in s and "BTC alert" not in s for s in note.sent)   # coin-labelled
+
+
+def test_chart_caption_uses_asset_not_hardcoded_btc():
+    from agent.plotter import build_btc_chart
+    cfg = WatchConfig(symbol="XMR/USDT", market="futures", trend_tf="1h")
+    png, cap = build_btc_chart(
+        cfg, {"best_top": {"name": "rsi_14"}, "best_bottom": {"name": "rsi_14"}},
+        klines_fn=lambda tf, lim: [[float(i * 1000), 335 + i, 336 + i, 334 + i, 335 + i, 10.0]
+                                   for i in range(180)])
+    assert "XMR" in cap and "BTC" not in cap

@@ -112,33 +112,55 @@ def _maybe_upgrade_notice(cfg, notifier) -> bool:
     return True
 
 
+def _coins_spec(base):
+    """[(coin, symbol, market)] to watch. BTC (spot) always; XMR (futures — spot delisted) when
+    WATCH_XMR is on (default). Extra coins via WATCH_COINS='name:SYMBOL/USDT:market,...'."""
+    spec = [(base.coin, base.symbol, base.market)]            # base coin = btc spot
+    if os.getenv("WATCH_XMR", "true").strip().lower() in ("1", "true", "yes", "on"):
+        spec.append(("xmr", os.getenv("WATCH_XMR_SYMBOL", "XMR/USDT"), "futures"))
+    for item in os.getenv("WATCH_COINS", "").split(","):       # optional extra coins
+        parts = [x.strip() for x in item.split(":")]
+        if len(parts) == 3 and parts[0] and parts[0] not in {c for c, _s, _m in spec}:
+            spec.append((parts[0], parts[1], parts[2]))
+    return spec
+
+
 def _build():
+    """Build the shared resources + a per-coin bundle (cfg, monitor, news, listener-analyst)."""
+    from .alerts import AlertStore
     from .analyst import build_analyst, numeric_summary
-    from .config import AnalysisConfig, WatchConfig
+    from .config import AnalysisConfig, WatchConfig, coin_config
     from .market_monitor import MarketMonitor
     from .notify import Notifier
     from .scratch import Scratch
     from .secrets import clean_secret
-
+    from .telegram_listener import _Coin
     from .websearch import NewsCache, search_and_read
 
-    cfg = WatchConfig.from_env()
+    base = WatchConfig.from_env()
     acfg = AnalysisConfig()
-    scratch = Scratch(cfg.scratch_dir)
+    scratch = Scratch(base.scratch_dir)
     api_key = clean_secret(os.getenv(acfg.api_key_env))
-    news_fn = NewsCache(cfg.news_ttl_s).get if cfg.news_enabled else None
     search_fn = ((lambda q, after=None, before=None: search_and_read(
-                    q, max_results=cfg.search_max_results, fetch_n=cfg.fetch_articles,
-                    max_chars=cfg.article_max_chars, after=after, before=before))
-                 if cfg.web_search_enabled else None)
-    # SEPARATE analyst per thread: the monitor thread and the listener thread each get their
-    # own instance so per-call scratch state (last_plot, last_search) can't race across threads.
-    def _mk_analyst():
-        return build_analyst(acfg, api_key, scratch, max_tokens=cfg.analyst_max_tokens,
-                             news_fn=news_fn, search_fn=search_fn)
+                    q, max_results=base.search_max_results, fetch_n=base.fetch_articles,
+                    max_chars=base.article_max_chars, after=after, before=before))
+                 if base.web_search_enabled else None)
     notifier = Notifier(chat_id=_chat_allowlist())   # broadcast to operator + shared users
-    monitor = MarketMonitor(cfg, notifier=notifier, analyst=_mk_analyst())
-    return cfg, monitor, _mk_analyst(), notifier, scratch, news_fn, numeric_summary
+
+    def mk_analyst(news_fn):  # SEPARATE analyst per thread so last_plot/last_search can't race
+        return build_analyst(acfg, api_key, scratch, max_tokens=base.analyst_max_tokens,
+                             news_fn=news_fn, search_fn=search_fn)
+
+    coins, lcoins = [], {}
+    for name, symbol, market in _coins_spec(base):
+        ccfg = coin_config(base, coin=name, symbol=symbol, market=market)
+        news_fn = (NewsCache(base.news_ttl_s, asset=symbol.split("/")[0]).get
+                   if base.news_enabled else None)
+        monitor = MarketMonitor(ccfg, notifier=notifier, analyst=mk_analyst(news_fn))
+        coins.append({"name": name, "cfg": ccfg, "monitor": monitor})
+        lcoins[name] = _Coin(name, ccfg, mk_analyst(news_fn), monitor.latest_snapshot,
+                             AlertStore(ccfg.user_alerts_path), news_fn)
+    return base, coins, lcoins, notifier, scratch, numeric_summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -162,37 +184,45 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     install_log_redaction()
 
-    cfg, monitor, analyst, notifier, scratch, news_fn, numeric_summary = _build()
+    base, coins, lcoins, notifier, scratch, numeric_summary = _build()
+    first = coins[0]                 # the base coin (btc) — CLI one-shots act on it
+    cfg, monitor = first["cfg"], first["monitor"]
 
     if args.status:
-        print(numeric_summary(monitor.latest_snapshot() or {}))
+        for c in coins:
+            print(f"=== {c['name'].upper()} ({c['cfg'].symbol}) ===")
+            print(numeric_summary(c["monitor"].latest_snapshot() or {}))
         return 0
     if args.tune:
         import datetime
         from .signal_tuner import leaderboard_text, run_tune
-        # default sweeps 5m/1h/4h/1d; --tf pins one. Live detector uses the trend-TF winner.
         tfs = [args.tf] if args.tf else ["5m", "15m", "1h", "4h", "1d"]
-        live_tf = args.tf or cfg.trend_tf
-        res = run_tune(cfg.symbol, timeframes=tfs, live_tf=live_tf,
-                       weeks=args.weeks or cfg.tune_weeks,
-                       lookback_days=cfg.tune_lookback_days,   # <= ~3 months
-                       out_path=cfg.tuned_signals_path,
-                       stamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
-        txt = leaderboard_text(res)
-        print(txt + f"\n\nsaved -> {cfg.tuned_signals_path} (live detector uses the {live_tf} winners)")
-        notifier.send("🔬 *Signal tune complete* — live detector now uses these.\n" + txt[:3500])
+        for c in coins:                 # tune every watched coin (each on its own market)
+            cc = c["cfg"]
+            live_tf = args.tf or cc.trend_tf
+            res = run_tune(cc.symbol, timeframes=tfs, live_tf=live_tf,
+                           weeks=args.weeks or cc.tune_weeks, market=cc.market,
+                           lookback_days=cc.tune_lookback_days, out_path=cc.tuned_signals_path,
+                           stamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
+            txt = leaderboard_text(res)
+            print(f"\n=== {cc.symbol} ({cc.market}) ===\n" + txt + f"\nsaved -> {cc.tuned_signals_path}")
+            notifier.send(f"🔬 *Signal tune complete* ({cc.symbol}) — live detector now uses these.\n"
+                          + txt[:3000])
         return 0
     if args.test_telegram:
-        notifier.send("✅ SatoshiStacker BTC watch: Telegram OK (read-only monitor).")
+        notifier.send("✅ SatoshiStacker watch: Telegram OK (read-only; "
+                      + " + ".join(c["cfg"].symbol for c in coins) + ").")
         return 0
     if args.once:
-        m = monitor.run_once()
-        print(numeric_summary(m))
-        if m.get("events"):
-            print("EVENTS:", ", ".join(m["events"]))
+        for c in coins:
+            m = c["monitor"].run_once()
+            print(f"=== {c['cfg'].symbol} ===")
+            print(numeric_summary(m))
+            if m.get("events"):
+                print("EVENTS:", ", ".join(m["events"]))
         return 0
 
-    # ── 24/7: monitor thread + Telegram listener ──
+    # ── 24/7: one monitor thread PER COIN + a single multi-coin Telegram listener ──
     from .telegram_listener import TelegramListener
     stop = threading.Event()
 
@@ -202,29 +232,34 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
 
-    _prune_old_data(cfg)            # data-retention sweep at startup (<= ~3 months)
-    mon_thread = threading.Thread(target=monitor.run, args=(stop,), daemon=True)
-    mon_thread.start()
+    _prune_old_data(base)           # data-retention sweep at startup (<= ~3 months)
+    threads = []
+    for c in coins:
+        t = threading.Thread(target=c["monitor"].run, args=(stop,), daemon=True)
+        t.start()
+        threads.append(t)
 
-    notifier.send("🟢 *BTC watch online* — tracking live; I'll ping you on tops, bottoms "
-                  "& unusual moves. Type /help any time.")
+    syms = " + ".join(c["cfg"].symbol for c in coins)
+    notifier.send(f"🟢 *Watch online* — tracking {syms}. I'll ping on tops, bottoms & unusual "
+                  "moves. Target a coin with e.g. `/xmr`, `/chart xmr 4h`. Type /help any time.")
     was_first = _first_launch_onboarding(notifier, cfg.onboarded_marker)  # one-time, first launch
     if not was_first:                       # existing install -> tell them what changed (once)
         _maybe_upgrade_notice(cfg, notifier)
 
     if cfg.poll_telegram:
         listener = TelegramListener(
-            cfg, token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            chat_id=_chat_allowlist(), analyst=analyst,
-            notifier=notifier, snapshot_fn=monitor.latest_snapshot, scratch=scratch,
-            news_fn=news_fn)
+            cfg, token=os.getenv("TELEGRAM_BOT_TOKEN", ""), chat_id=_chat_allowlist(),
+            analyst=lcoins[first["name"]].analyst, notifier=notifier,
+            snapshot_fn=monitor.latest_snapshot, scratch=scratch,
+            news_fn=lcoins[first["name"]].news_fn, coins=lcoins)
         listener.poll(stop)          # blocks in main thread until stop
     else:
         while not stop.is_set():
             stop.wait(3600)
 
     stop.set()
-    mon_thread.join(timeout=5)
+    for t in threads:
+        t.join(timeout=5)
     log.info("stopped")
     return 0
 

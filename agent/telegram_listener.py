@@ -172,41 +172,106 @@ def _nl_to_rule(text: str):
     return None
 
 
+class _Coin:
+    """One watched asset's resources for the listener (config, analyst, snapshot, alarms, news)."""
+    __slots__ = ("name", "cfg", "analyst", "snapshot_fn", "alerts", "news_fn")
+
+    def __init__(self, name, cfg, analyst, snapshot_fn, alerts, news_fn):
+        self.name, self.cfg, self.analyst = name, cfg, analyst
+        self.snapshot_fn, self.alerts, self.news_fn = snapshot_fn, alerts, news_fn
+
+
+# coin word/alias -> short name (used to route a command to a coin)
+_COIN_ALIASES = {"btc": "btc", "bitcoin": "btc", "xbt": "btc",
+                 "xmr": "xmr", "monero": "xmr"}
+
+
 class TelegramListener:
     def __init__(self, cfg: WatchConfig, *, token: str, chat_id: str,
-                 analyst, notifier, snapshot_fn, scratch=None, news_fn=None) -> None:
+                 analyst, notifier, snapshot_fn, scratch=None, news_fn=None,
+                 coins: dict | None = None) -> None:
+        from .alerts import AlertStore
+        from .memory import Memory
         from .secrets import clean_secret
-        self.cfg = cfg
         self.token = clean_secret(token)
         # chat_id may be a comma-separated ALLOWLIST (operator + shared users)
         self.chat_ids = {c.strip() for c in clean_secret(chat_id).split(",") if c.strip()}
-        self.analyst = analyst
         self.notifier = notifier
-        self.snapshot_fn = snapshot_fn       # () -> dict | None
         self.scratch = scratch
-        self.news_fn = news_fn               # () -> dict | None  (BTC news + Fear&Greed)
-        from .alerts import AlertStore
-        from .memory import Memory
-        self.memory = Memory(cfg.memory_path, ttl_s=cfg.memory_ttl_s,
+        if coins is None:                    # single-coin (default / test path): wrap the args
+            coins = {cfg.coin: _Coin(cfg.coin, cfg, analyst, snapshot_fn,
+                                     AlertStore(cfg.user_alerts_path), news_fn)}
+        self.coins = coins
+        self.default_coin = next(iter(coins))
+        self._active = self.default_coin     # command router points at this coin
+        self.memory = Memory(cfg.memory_path, ttl_s=cfg.memory_ttl_s,   # shared across coins
                              max_chat_turns=cfg.memory_max_turns)
-        self.alerts = AlertStore(cfg.user_alerts_path)
         self._offset = 0
         self._tuning = False        # guard: one retune at a time
+
+    # ── active-coin views: commands operate on the routed coin (default = first / btc) ──
+    @property
+    def _c(self):
+        return self.coins[self._active]
+
+    cfg = property(lambda self: self._c.cfg)
+    analyst = property(lambda self: self._c.analyst)
+    snapshot_fn = property(lambda self: self._c.snapshot_fn)
+    alerts = property(lambda self: self._c.alerts)
+    news_fn = property(lambda self: self._c.news_fn)
+
+    # commands whose 2nd token is NOT a coin selector (it's a search query / filename)
+    _NO_COIN_ARG = ("/search", "/get")
+
+    def _coin_in(self, text: str):
+        """First watched-coin token in the message (e.g. 'xmr', 'monero'), else None."""
+        for tok in re.split(r"[^a-z0-9]+", (text or "").lower()):
+            c = _COIN_ALIASES.get(tok)
+            if c and c in self.coins:
+                return c
+        return None
+
+    def _route(self, text: str) -> str:
+        """Pick the coin a message targets (default = first coin) and return the text to handle.
+        Rules: a leading '/xmr'|'xmr' => that coin's status (or its prefix for the rest); a coin
+        as the 2nd token of a slash-command (e.g. '/chart xmr 4h') => strip it & target the coin
+        (NOT for /search or /get, whose args are free text); a coin word in plain text => target
+        it WITHOUT stripping (so the question / search query stays intact)."""
+        self._active = self.default_coin
+        toks = (text or "").split()
+        if not toks:
+            return text
+        head = toks[0].lower().lstrip("/")
+        if head in _COIN_ALIASES and _COIN_ALIASES[head] in self.coins:   # leading coin
+            self._active = _COIN_ALIASES[head]
+            rest = " ".join(toks[1:]).strip()
+            return rest or "/status"
+        if toks[0].startswith("/"):                                       # slash-command
+            if (len(toks) >= 2 and toks[0].lower() not in self._NO_COIN_ARG):
+                t1 = toks[1].lower().lstrip("/")
+                if t1 in _COIN_ALIASES and _COIN_ALIASES[t1] in self.coins:
+                    self._active = _COIN_ALIASES[t1]
+                    return toks[0] + (" " + " ".join(toks[2:]) if len(toks) > 2 else "")
+            return text
+        c = self._coin_in(text)                                           # plain text: detect, don't strip
+        if c:
+            self._active = c
+        return text
 
     # ── routing (pure given injected deps) ──
     def handle_text(self, text: str) -> str:
         from .analyst import numeric_summary
-        text = (text or "").strip()
+        text = self._route((text or "").strip())   # pick the target coin; clean the text
         low = text.lower()
         snap = self.snapshot_fn() or {}
         if low in ("/start", "/help", "help", "?", "/?", "commands"):
             return _HELP
         if low in ("/raw",):
             return numeric_summary(snap)
-        if low in ("/btc", "/status", "/now"):
+        if low in ("/btc", "/xmr", "/status", "/now"):
             if not snap:
                 return "no snapshot yet — monitor is warming up"
-            return self.analyst.answer("Give a concise read of BTC right now.", snap)
+            return self.analyst.answer(f"Give a concise read of {self.cfg.symbol} right now.", snap)
         if low.split(" ", 1)[0] in ("/chart", "/plot"):
             rest = text.split(" ", 1)[1] if " " in text else None      # e.g. "/chart 4h rsi macd"
             self._send_charts(snap, question=rest, timeframe=self._parse_chart_tf(text))
@@ -229,7 +294,7 @@ class TelegramListener:
             return onchain_text((snap or {}).get("onchain") or {})
         if low.split(" ", 1)[0] in ("/origins", "/panel", "/sources", "/widget", "/controls"):
             from .origins import widget_text
-            return widget_text(self._prefs_full())   # text view; _process_update sends buttons
+            return widget_text(self._prefs_full(), self._active)  # text view; buttons via _process_update
         if low in ("/digest", "/newsdigest"):
             return self._digest_text()
         if low.split(" ", 1)[0] in ("/retune", "/tune", "/recompute"):
@@ -393,22 +458,24 @@ class TelegramListener:
         weeks = float(m.group(1)) if m else self.cfg.tune_weeks
         weeks = max(2.0, min(weeks, self.cfg.tune_lookback_days / 7.0))   # bound to <= ~3 months
         self._tuning = True
-        threading.Thread(target=self._do_retune, args=(weeks,), daemon=True).start()
-        return (f"🔬 *Retuning on the server* — backtesting the indicator battery and *sweeping "
-                f"periods* (e.g. RSI 7–28, Stoch/MFI/Boll/CCI…) over ~{weeks:g} weeks of fresh "
-                f"BTC data across 5m/1h/4h/1d. I'll post the best top/bottom callers in ~½–1 min.")
+        cfg = self.cfg                       # snapshot the active coin's cfg for the thread
+        threading.Thread(target=self._do_retune, args=(weeks, cfg), daemon=True).start()
+        return (f"🔬 *Retuning {cfg.symbol} on the server* — backtesting the indicator battery and "
+                f"*sweeping periods* (e.g. RSI 7–28, Stoch/MFI/Boll/CCI/EMA…) over ~{weeks:g} weeks "
+                f"of fresh {cfg.market} data across 5m/15m/1h/4h. I'll post the winners in ~½–1 min.")
 
-    def _do_retune(self, weeks: float) -> None:
+    def _do_retune(self, weeks: float, cfg) -> None:
         import datetime
         from .signal_tuner import leaderboard_text, run_tune
         try:
-            res = run_tune(self.cfg.symbol, timeframes=("5m", "15m", "1h", "4h", "1d"),
-                           live_tf=self.cfg.trend_tf, weeks=weeks,
-                           lookback_days=self.cfg.tune_lookback_days,
-                           out_path=self.cfg.tuned_signals_path,
+            res = run_tune(cfg.symbol, timeframes=("5m", "15m", "1h", "4h", "1d"),
+                           live_tf=cfg.trend_tf, weeks=weeks, market=cfg.market,
+                           lookback_days=cfg.tune_lookback_days,
+                           out_path=cfg.tuned_signals_path,
                            stamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
-            self.notifier.send("✅ *Retune complete* — live detector now uses these (best period "
-                               "per family, swept on fresh data).\n" + leaderboard_text(res)[:3500])
+            self.notifier.send(f"✅ *Retune complete* ({cfg.symbol}) — live detector now uses these "
+                               "(best period per family, swept on fresh data).\n"
+                               + leaderboard_text(res)[:3500])
         except Exception as e:  # noqa: BLE001 - a retune must never crash the bot
             log.warning("retune failed: %s", e)
             self.notifier.send(f"⚠️ retune failed: {e}")
@@ -539,18 +606,20 @@ class TelegramListener:
             return None
 
     def _send_widget(self, chat: str) -> bool:
-        """Send the interactive /origins panel to ``chat``. Returns False if it couldn't
-        (no token) so the caller can fall back to the text view."""
+        """Send the interactive /origins panel for the ACTIVE coin to ``chat``. Returns False
+        if it couldn't (no token) so the caller can fall back to the text view."""
         from .origins import keyboard, widget_text
+        coin = self._active
         prefs = self._prefs_full()
         res = self._tg_api("sendMessage", {
-            "chat_id": chat, "text": widget_text(prefs), "parse_mode": "Markdown",
-            "disable_web_page_preview": True, "reply_markup": keyboard(prefs)})
+            "chat_id": chat, "text": widget_text(prefs, coin), "parse_mode": "Markdown",
+            "disable_web_page_preview": True, "reply_markup": keyboard(prefs, coin)})
         return bool(res and res.get("ok"))
 
     def _handle_callback(self, cbq: dict) -> None:
-        """A widget button tap: apply it to prefs, re-render the panel in place, ack."""
-        from .origins import apply_callback, keyboard, widget_text
+        """A widget button tap: route to the coin in the callback data, apply it to that coin's
+        prefs, re-render the panel in place, ack."""
+        from .origins import apply_callback, keyboard, widget_text, _KEYS
         data = cbq.get("data", "")
         cbid = cbq.get("id")
         msg = cbq.get("message") or {}
@@ -562,27 +631,38 @@ class TelegramListener:
         if data.startswith("ack:") or data.startswith("del:"):   # a fired-alarm button
             self._handle_alarm_button(data, msg, cbid)
             return
-        if data == "og:x":                              # close -> drop the keyboard
+        if not data.startswith("og:"):
+            self._tg_api("answerCallbackQuery", {"callback_query_id": cbid})
+            return
+        parts = data.split(":")                          # og:<coin>:<action>[:<arg>]
+        coin = parts[1] if len(parts) >= 2 else self.default_coin
+        if coin in self.coins:
+            self._active = coin                          # route prefs ops to this coin
+        if len(parts) >= 3 and parts[2] == "x":          # close -> drop the keyboard
             self._tg_api("editMessageReplyMarkup", {"chat_id": chat, "message_id": mid})
             self._tg_api("answerCallbackQuery", {"callback_query_id": cbid, "text": "closed"})
             return
         new, toast = apply_callback(data, self._prefs_full())
         if new is not None:
-            from .origins import _KEYS
             self._update_prefs(**{k: new[k] for k in _KEYS})
         prefs = self._prefs_full()
         self._tg_api("editMessageText", {
-            "chat_id": chat, "message_id": mid, "text": widget_text(prefs),
+            "chat_id": chat, "message_id": mid, "text": widget_text(prefs, coin),
             "parse_mode": "Markdown", "disable_web_page_preview": True,
-            "reply_markup": keyboard(prefs)})
+            "reply_markup": keyboard(prefs, coin)})
         self._tg_api("answerCallbackQuery", {"callback_query_id": cbid, "text": toast or ""})
 
     def _handle_alarm_button(self, data: str, msg: dict, cbid) -> None:
-        """A fired-alarm button. '✓ Seen' snoozes the trigger (restarts its cooldown, stays
-        disarmed); '🗑 Delete' removes it. Edits the message to show the outcome + drops the
-        buttons. Edit is plain-text (no parse_mode) so re-rendering can't choke on markdown."""
+        """A fired-alarm button (ack:<coin>:<id> / del:<coin>:<id>). '✓ Seen' snoozes the
+        trigger (restarts its cooldown, stays disarmed); '🗑 Delete' removes it — on that COIN's
+        alarm store. Edits the message (plain text, no parse_mode) + drops the buttons."""
         import time
-        action, _, sid = data.partition(":")
+        parts = data.split(":")
+        action = parts[0]
+        coin = parts[1] if len(parts) >= 3 else self.default_coin    # legacy ack:<id> -> default
+        sid = parts[2] if len(parts) >= 3 else (parts[1] if len(parts) > 1 else "")
+        if coin in self.coins:
+            self._active = coin                          # route to this coin's AlertStore
         chat = str((msg.get("chat") or {}).get("id", ""))
         mid = msg.get("message_id")
         orig = (msg.get("text") or "").strip()
@@ -627,8 +707,9 @@ class TelegramListener:
             return
         cmd = text.strip().lower().split(maxsplit=1)[0]
         if cmd in self._WIDGET_CMDS:                    # send live buttons, not text
+            self._active = self._coin_in(text) or self.default_coin   # /origins xmr -> xmr panel
             if not self._send_widget(chat):
-                self.notifier.send(self.handle_text("/origins"))   # text fallback (no token)
+                self.notifier.send(self.handle_text("/origins " + self._active))   # text fallback
             return
         try:
             reply = self.handle_text(text)
