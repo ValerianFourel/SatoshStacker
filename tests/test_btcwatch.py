@@ -1474,3 +1474,45 @@ def test_nl_composite_ma_mode_returns_none_not_trio():
     for t in ("alert me when ema is in sell mode", "ema50 and ma200 in sell mode",
               "moving average in sell mode", "sma in buy mode"):
         assert nl_to_composite(t) is None, t
+
+
+# ── multi-timeframe charting (plot any TF, with that TF's signals) ──
+def test_parse_chart_tf():
+    P = TelegramListener._parse_chart_tf
+    assert P("/chart 4h") == "4h" and P("/chart 15m rsi macd") == "15m" and P("/chart 5m") == "5m"
+    assert P("show me the 15min chart") == "15m" and P("plot the 5 min macd") == "5m"
+    assert P("plot the 4 hour rsi & ema50") == "4h" and P("show me 1 hour chart") == "1h"
+    assert P("/chart") is None and P("plot rsi 70 macd") is None     # 70 is not a timeframe
+    assert P("chart ema50 and rsi") is None                          # ema50 is an indicator
+
+
+def test_chart_uses_requested_timeframe_and_tf_tuned():
+    from agent.plotter import build_btc_chart
+    seen = {}
+
+    def kf(tf, lim):
+        seen["tf"] = tf
+        return [[float(i * 1000), 60000 + i, 60000 + i + 5, 60000 + i - 5, 60000 + i, 100.0]
+                for i in range(lim)]
+    cfg = WatchConfig(symbol="BTC/USDT", trend_tf="1h")
+    tuned = {"best_top": {"name": "rsi_14"}, "best_bottom": {"name": "rsi_14"},
+             "per_timeframe": {"4h": {"best_top": {"name": "ema_slope_50"},
+                                      "best_bottom": {"name": "mfi_14"}}}}
+    png, cap = build_btc_chart(cfg, tuned, klines_fn=kf, timeframe="4h")
+    assert seen["tf"] == "4h"                          # fetched 4h candles, not 1h
+    assert "`4h`" in cap and "EMA50 vel" in cap        # used the 4h timeframe's tuned winners
+    build_btc_chart(cfg, tuned, klines_fn=kf, timeframe="bogus")
+    assert seen["tf"] == "1h"                          # invalid tf -> default trend_tf
+
+
+def test_listener_chart_command_passes_timeframe(monkeypatch):
+    captured = {}
+
+    def fake_send(self, snap, question=None, timeframe=None):
+        captured.update(tf=timeframe, q=question)
+        return 1
+    monkeypatch.setattr(TelegramListener, "_send_charts", fake_send)
+    lis = TelegramListener(WatchConfig(), token="t", chat_id="42", analyst=MockAnalyst(),
+                           notifier=FakeNotifier(), snapshot_fn=lambda: {"price": 1})
+    assert lis.handle_text("/chart 4h rsi") == ""
+    assert captured["tf"] == "4h" and "rsi" in captured["q"]

@@ -16,6 +16,19 @@ log = logging.getLogger("satoshistacker.plotter")
 _BANDS = {"rsi_14": (70, 30), "rsi_21": (70, 30), "stoch_rsi_14": (80, 20),
           "stoch_14": (80, 20), "mfi_14": (80, 20), "williams_14": (80, 20),
           "bb_pctb_20": (100, 0)}
+_FAMILY_BANDS = {"rsi": (70, 30), "mfi": (80, 20), "stoch": (80, 20), "stoch_rsi": (80, 20),
+                 "williams": (80, 20), "bb_pctb": (100, 0), "cci": (100, -100)}
+TF_CHOICES = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
+
+
+def _bands_for(name: str):
+    """Reference bands for an oscillator panel — exact name, else by family (so swept names
+    like rsi_15 / mfi_21 still get their 70/30 / 80/20 guides)."""
+    if name in _BANDS:
+        return _BANDS[name]
+    import re
+    m = re.fullmatch(r"([a-z_]+?)_\d+", name or "")
+    return _FAMILY_BANDS.get(m.group(1)) if m else None
 
 
 def render_chart(klines: list, *, title: str, panels: list, marks: dict | None = None) -> bytes | None:
@@ -115,12 +128,14 @@ def render_series_chart(title: str, price_klines: list, panels: list) -> bytes |
         return None
 
 
-def build_derivs_chart(cfg, *, klines_fn=None, derivs_fn=None) -> tuple[bytes | None, str]:
+def build_derivs_chart(cfg, *, klines_fn=None, derivs_fn=None,
+                       timeframe=None) -> tuple[bytes | None, str]:
     """Crypto-native derivatives chart (Binance perp, no key): price + funding-rate
-    history + open interest + long/short ratio + taker buy/sell flow."""
+    history + open interest + long/short ratio + taker buy/sell flow. ``timeframe`` picks
+    the candle/period window (defaults to ``cfg.trend_tf``)."""
     from .exchange import public_derivs_history, public_klines
-    period = cfg.trend_tf if cfg.trend_tf in (
-        "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d") else "1h"
+    period = timeframe if timeframe in TF_CHOICES else (
+        cfg.trend_tf if cfg.trend_tf in TF_CHOICES else "1h")
     if klines_fn is None:
         klines_fn = lambda tf, lim: public_klines(cfg.symbol, tf, lim)  # noqa: E731
     if derivs_fn is None:
@@ -141,33 +156,39 @@ def build_derivs_chart(cfg, *, klines_fn=None, derivs_fn=None) -> tuple[bytes | 
 
 
 def build_btc_chart(cfg, tuned: dict | None, *, snapshot: dict | None = None,
-                    klines_fn=None, indicators=None) -> tuple[bytes | None, str]:
-    """Fetch candles and plot price + indicators, return (png, caption).
+                    klines_fn=None, indicators=None, timeframe=None) -> tuple[bytes | None, str]:
+    """Fetch candles and plot price + indicators on a CHOSEN timeframe, return (png, caption).
 
-    ``indicators`` (validated battery names) = the LLM's picks; if absent, fall back to
-    the backtest-leading tuned top/bottom callers, else RSI(14)."""
+    ``timeframe`` (5m/15m/1h/4h/…) selects the candle window; defaults to ``cfg.trend_tf``.
+    ``indicators`` (validated battery names) = the LLM's picks; if absent, fall back to the
+    backtest-leading tuned top/bottom callers *for that timeframe* (per_timeframe winners),
+    else the live winners, else RSI(14)."""
     from .signal_tuner import PERIODS, _pretty, compute_one
     import numpy as np
     if klines_fn is None:
         from .exchange import public_klines
         klines_fn = lambda tf, lim: public_klines(cfg.symbol, tf, lim)  # noqa: E731
-    tf = cfg.trend_tf
+    tf = timeframe if timeframe in TF_CHOICES else cfg.trend_tf
     kl = klines_fn(tf, 180)
     a = np.array(kl, dtype=float)
     o, h, l, c, v = a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5]
 
+    # the tuned signals FOR this timeframe (from a retune's per_timeframe block) if present,
+    # else the live-tf winners — so the chart shows the signal associated with the TF being plotted.
+    tf_tuned = (((tuned or {}).get("per_timeframe", {}) or {}).get(tf)) or tuned or {}
+
     names: list[str] = []
     if indicators:                                       # LLM-picked
         names = [n for n in indicators if n in PERIODS][:3]
-    if not names:                                        # backtest-leading
+    if not names:                                        # backtest-leading (this TF's winners)
         for side in ("best_top", "best_bottom"):
-            sig = (tuned or {}).get(side)
-            if sig and sig["name"] not in names:
+            sig = tf_tuned.get(side)
+            if sig and sig.get("name") and sig["name"] not in names:
                 names.append(sig["name"])
     if not names:
         names = ["rsi_14"]
     names = names[:3]
-    panels = [(_pretty(n), compute_one(n, o, h, l, c, v), _BANDS.get(n)) for n in names]
+    panels = [(_pretty(n), compute_one(n, o, h, l, c, v), _bands_for(n)) for n in names]
 
     marks = None
     if snapshot:

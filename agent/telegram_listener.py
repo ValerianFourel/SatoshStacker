@@ -35,8 +35,9 @@ _HELP = (
     "(e.g. RSI 7–28) to pick the strongest parameterization (e.g. RSI(15) over RSI(14))\n"
     "`/btc` or `/status` — my read of BTC right now\n"
     "`/raw` — just the numbers, no LLM\n"
-    "`/chart` — price + the leading indicators, plotted\n"
-    "`/derivs` (or `/liq`) — funding · open interest · long/short · taker flow\n"
+    "`/chart [tf] [indicators]` — price + indicators on a timeframe, e.g. `/chart 4h rsi macd`, "
+    "`/chart 15m`, `/chart 5m` (default 1h; tf ∈ 5m·15m·1h·4h…) — or _plot the 4h rsi & ema50_\n"
+    "`/derivs [tf]` (or `/liq`) — funding · open interest · long/short · taker flow\n"
     "`/levels [%]` — reentry & sell zones; add a target (e.g. `/levels 1`) to scale a\n"
     "          buy→sell pair that nets ~that % after Binance fees + spread.\n"
     "          `/sell 1` anchors on the sell instead; or 'sell at 65k, keep 1%'\n"
@@ -206,12 +207,13 @@ class TelegramListener:
             if not snap:
                 return "no snapshot yet — monitor is warming up"
             return self.analyst.answer("Give a concise read of BTC right now.", snap)
-        if low in ("/chart", "/plot"):
-            self._send_charts(snap)
+        if low.split(" ", 1)[0] in ("/chart", "/plot"):
+            rest = text.split(" ", 1)[1] if " " in text else None      # e.g. "/chart 4h rsi macd"
+            self._send_charts(snap, question=rest, timeframe=self._parse_chart_tf(text))
             return ""        # photo(s) already sent; no extra text
-        if low in ("/derivs", "/liq", "/funding", "/oi"):
+        if low.split(" ", 1)[0] in ("/derivs", "/liq", "/funding", "/oi"):
             from .plotter import build_derivs_chart
-            png, cap = build_derivs_chart(self.cfg)
+            png, cap = build_derivs_chart(self.cfg, timeframe=self._parse_chart_tf(text))
             self.notifier.send_photo(png, cap)
             return ""
         if low.split(" ", 1)[0] in ("/levels", "/entry", "/sell", "/buy"):
@@ -315,9 +317,9 @@ class TelegramListener:
                                   "make an alarm", "create an alarm", "set an alert",
                                   "set up an alert")):
             return self._make_alarm(text, snap)
-        # natural-language chart request -> send the LLM-orchestrated patchwork
+        # natural-language chart request -> send the LLM-orchestrated patchwork (chosen TF)
         if "show me" in low or any(w in low for w in ("chart", "plot", "graph", "draw")):
-            self._send_charts(snap, question=text)
+            self._send_charts(snap, question=text, timeframe=self._parse_chart_tf(text))
             return ""
         # conversational answer, with multi-day memory (conversation + recent searches)
         reply = self.analyst.answer(text, snap, history=self.memory.recent_chat(),
@@ -330,9 +332,9 @@ class TelegramListener:
                                    after=srch.get("after"), before=srch.get("before"))
         return reply
 
-    def _send_charts(self, snap, question=None) -> int:
-        """Render the LLM's patchwork (1+ images, each price + chosen panels) and send
-        each as a photo. Returns the number sent. Falls back to one default image."""
+    def _send_charts(self, snap, question=None, timeframe=None) -> int:
+        """Render the LLM's patchwork (1+ images, each price + chosen panels) on the chosen
+        ``timeframe`` and send each as a photo. Returns the number sent. Falls back to one image."""
         from .plotter import build_btc_chart
         from .signal_tuner import load_tuned
         groups = []
@@ -344,11 +346,24 @@ class TelegramListener:
         tuned = load_tuned(self.cfg.tuned_signals_path)
         sent = 0
         for g in (groups or [None]):          # [None] -> one default (backtest-leading) image
-            png, cap = build_btc_chart(self.cfg, tuned, snapshot=snap or None, indicators=g)
+            png, cap = build_btc_chart(self.cfg, tuned, snapshot=snap or None, indicators=g,
+                                       timeframe=timeframe)
             if png:
                 self.notifier.send_photo(png, cap)
                 sent += 1
         return sent
+
+    @staticmethod
+    def _parse_chart_tf(text: str):
+        """Pull a timeframe out of a chart request: '4h', '15m', '5 min', '1 hour', '4hour'
+        -> a canonical TF in plotter.TF_CHOICES, else None (caller defaults to the live TF)."""
+        from .plotter import TF_CHOICES
+        m = re.search(r"(?<!\w)(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b",
+                      (text or "").lower())
+        if not m:
+            return None
+        cand = m.group(1) + m.group(2)[0]     # e.g. '4'+'h' -> '4h'
+        return cand if cand in TF_CHOICES else None
 
     def _prefs_full(self):
         from .sensitivity import read_prefs
